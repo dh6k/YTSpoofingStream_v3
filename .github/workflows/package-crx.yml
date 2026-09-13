@@ -158,15 +158,5 @@ jobs:
           CRX_PEM_BASE64: ${{ secrets.CRX_PEM_BASE64 }}
         run: |
           if [ -z "$CRX_PEM_BASE64" ] && [ -f key.pem ]; then
-            echo "::warning::New key.pem generated. Download the crx-and-key artifact (1-day) and store base64(key.pem) as secret CRX_PEM_BASE64. Do NOT leave the artifact public."
+            echo "::warning::New key.pem was generated in this run. Download it from the runner immediately (or re-pack locally with tools/pack.ps1) and store base64(key.pem) as secret CRX_PEM_BASE64. Do NOT commit key.pem and do NOT upload it as a public artifact."
           fi
-
-      - name: Upload ephemeral key+crx artifact (1 day)
-        if: failure() && hashFiles('key.pem') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: crx-and-key
-          path: |
-            key.pem
-            ytsSpoofingstream-vorapis-*.crx
-          retention-days: 1
