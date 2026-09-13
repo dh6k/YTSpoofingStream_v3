@@ -1,0 +1,172 @@
+name: Package CRX
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version override (optional, else manifest)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            V="${{ github.event.inputs.version }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            V="${GITHUB_REF_NAME#v}"
+          else
+            V=$(node -p "require('./manifest.json').version")
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Packaging version $V"
+
+      - name: Stage extension files
+        run: |
+          mkdir -p dist
+          cp manifest.json background.js bridge.js inject.js \
+             popup.html popup.js harvester.html harvester.js ytm_harvester_cs.js \
+             icon16.png icon48.png icon128.png logo.svg dist/
+          node -e "
+            const fs=require('fs');
+            const m=JSON.parse(fs.readFileSync('dist/manifest.json','utf8'));
+            m.version=process.env.VER;
+            fs.writeFileSync('dist/manifest.json', JSON.stringify(m,null,2)+'\n');
+          "
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+
+      - name: Restore signing key
+        env:
+          CRX_PEM_BASE64: ${{ secrets.CRX_PEM_BASE64 }}
+        run: |
+          if [ -n "$CRX_PEM_BASE64" ]; then
+            printf '%s' "$CRX_PEM_BASE64" | base64 -d > key.pem
+            chmod 600 key.pem
+            echo "Using stored signing key (stable extension ID)."
+          else
+            echo "::warning::CRX_PEM_BASE64 secret missing. A NEW key will be generated — extension ID will change and users cannot upgrade in place. Save the emitted PEM as repo secret CRX_PEM_BASE64 after this run."
+          fi
+
+      - name: Install Chromium
+        id: chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Pack CRX
+        run: |
+          CHROME="${{ steps.chrome.outputs.chrome-path }}"
+          if [ -f key.pem ]; then
+            "$CHROME" --no-sandbox --pack-extension="$GITHUB_WORKSPACE/dist" \
+              --pack-extension-key="$GITHUB_WORKSPACE/key.pem" --no-message-box
+          else
+            "$CHROME" --no-sandbox --pack-extension="$GITHUB_WORKSPACE/dist" --no-message-box
+          fi
+          test -f "$GITHUB_WORKSPACE/dist.crx"
+          V="${{ steps.ver.outputs.version }}"
+          cp "$GITHUB_WORKSPACE/dist.crx" "ytspoofingstream-vorapis-$V.crx"
+          if [ ! -f key.pem ] && [ -f dist.pem ]; then
+            cp dist.pem key.pem
+          fi
+
+      - name: Compute extension ID
+        id: ext
+        run: |
+          if [ -f key.pem ]; then
+            ID=$(node tools/extid.js key.pem)
+          else
+            ID="unknown"
+          fi
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          echo "Extension ID: $ID"
+
+      - name: Write updates.xml
+        env:
+          EXT_ID: ${{ steps.ext.outputs.id }}
+          VER: ${{ steps.ver.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          TAG="v${VER}"
+          CRX_URL="https://github.com/${REPO}/releases/download/${TAG}/ytspoofingstream-vorapis-${VER}.crx"
+          cat > update/updates.xml <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <gupdate xmlns="http://www.google.com/update2/response" protocol="2.0">
+            <app appid="${EXT_ID}">
+              <updatecheck codebase="${CRX_URL}" version="${VER}" />
+            </app>
+          </gupdate>
+          EOF
+          sed -i 's/^[[:space:]]*//' update/updates.xml
+          cat update/updates.xml
+
+      - name: Publish update feed on main
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXT_ID: ${{ steps.ext.outputs.id }}
+          VER: ${{ steps.ver.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Upload updates.xml to main via API (no branch switch)
+          B64=$(base64 -w0 update/updates.xml)
+          SHA=$(gh api "repos/${REPO}/contents/update/updates.xml" --jq .sha 2>/dev/null || true)
+          if [ -n "$SHA" ]; then
+            gh api -X PUT "repos/${REPO}/contents/update/updates.xml" \
+              -f message="chore: update feed → v${VER}" \
+              -f content="$B64" \
+              -f sha="$SHA" \
+              -f branch=main
+          else
+            gh api -X PUT "repos/${REPO}/contents/update/updates.xml" \
+              -f message="chore: update feed → v${VER}" \
+              -f content="$B64" \
+              -f branch=main
+          fi
+          echo "Published feed for appid=${EXT_ID} version=${VER}"
+
+      - name: Upload CRX to Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          ls -la *.crx
+          gh release create "v${VER}" \
+            "ytspoofingstream-vorapis-${VER}.crx" \
+            --title "v${VER}" \
+            --notes "Packed CRX for ytsSpoofingstream (vorapis edition). Install with Developer mode, then chrome://extensions -> Update." \
+            || gh release upload "v${VER}" "ytspoofingstream-vorapis-${VER}.crx" --clobber
+
+      - name: Warn if signing key was newly generated
+        if: always()
+        env:
+          CRX_PEM_BASE64: ${{ secrets.CRX_PEM_BASE64 }}
+        run: |
+          if [ -z "$CRX_PEM_BASE64" ] && [ -f key.pem ]; then
+            echo "::warning::New key.pem generated. Download the crx-and-key artifact (1-day) and store base64(key.pem) as secret CRX_PEM_BASE64. Do NOT leave the artifact public."
+          fi
+
+      - name: Upload ephemeral key+crx artifact (1 day)
+        if: failure() && hashFiles('key.pem') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: crx-and-key
+          path: |
+            key.pem
+            ytsSpoofingstream-vorapis-*.crx
+          retention-days: 1

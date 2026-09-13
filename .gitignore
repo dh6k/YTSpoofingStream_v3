@@ -5,6 +5,11 @@ image_captured/
 *.rar
 *.zip
 *.xpi
+*.crx
+*.pem
 prompt.txt
 execution/
 base.js
+dist/
+dist-out/
+key.pem

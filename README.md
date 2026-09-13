@@ -164,6 +164,30 @@ Comprehensive 1x real-time full-duration tests across 4 diverse benchmark tracks
 
 ---
 
+## Vorapis edition (this fork)
+
+Extension name: **ytspoofingstream (vorapis edition)** — YTSS engine only. Does **not** embed V3.
+
+Run Project VORAPIS v3 via your userscript manager (Tampermonkey). Do not also inject `vorapis.js` from this extension or you get *"multiple instances of V3"*.
+
+- YTSS: `inject.js` (MAIN) + `bridge.js` (ISOLATED) on `youtube.com`
+- V3 keeps the 2014 player chrome (`#movie_player`, `.ytp-*`), so the `★ 774` badge still mounts
+- Both hook `window.fetch`; each wraps the previous — order is userscript first (document-start) then content script, chain stays intact
+
+### Pack CRX + auto-update
+
+```powershell
+# local (Chrome/Edge/Helium)
+.\tools\pack.ps1
+# output: dist-out/ytspoofingstream-vorapis-<ver>.crx  +  key.pem (keep secret)
+```
+
+CI: push tag `v0.2.1` (or run **Package CRX** workflow). Store `key.pem` as repo secret `CRX_PEM_BASE64` so later builds keep the same extension ID.
+
+`manifest.json` has `update_url` → `https://raw.githubusercontent.com/dh6k/YTSpoofingStream_v3/main/update/updates.xml`. Install the packed `.crx` (Developer mode), then **chrome://extensions → Update** pulls the feed from this fork's Releases. Unpacked installs ignore `update_url`.
+
+---
+
 ## 🚀 Installation
 
 ### Chromium Browsers (Google Chrome, Brave, Edge, Opera)

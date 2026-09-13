@@ -41,6 +41,7 @@
     rawItag: false,
     shadowPlayer: true,
     shadowVolume: 1.0,
+    lang: 'vi',
   };
 
   // Keys that may live in `S`. Earlier builds pushed the whole extension storage
@@ -1629,6 +1630,11 @@
       this.isActive = false;
       this.activeVideoId = null;
       this.best774Candidate = null;
+      // Drop stale 774 stamp immediately so SFN/badge do not lie during the gap
+      status.activeAudioItag = 251;
+      status.activeMethod = 'original';
+      status.fallbackReason = 'Video transition';
+      if (typeof PlayerBadgeUI !== 'undefined') PlayerBadgeUI.update();
       if (this.pending774 && this.pending774.videoId !== newVid) {
         this.pending774 = null;
       }
@@ -3262,17 +3268,24 @@
 
   // ═══════════════════════════════════════════════════════════════════
   // ═══════════════════════════════════════════════════════════════════
-  // NATIVE STATS FOR NERDS OVERRIDE & SPOOFER
+  // CLASSIC 2014 "STATS FOR NERDS" PANEL (V3 / original layout)
   // ═══════════════════════════════════════════════════════════════════
   const StatsForNerdsSpoofer = {
     initialized: false,
     timer: null,
+    visible: false,
+    _frames: { decoded: 0, dropped: 0, parsed: 0, presented: 0 },
+    _bytes: { video: 0, audio: 0 },
+    _bwSamples: [],
+    _lastTs: 0,
+    _lastTime: 0,
+    _painted: 0,
 
     getCodecText() {
       if (!S.enabled) return null;
-      // If we are in fallback mode (not playing real 774), keep the raw original ITAG (251, 140, etc.)
       const isReal774 = status.activeAudioItag === 774 && !status.fallbackReason;
       if (!isReal774) return null;
+      // Leading "/ " matches Mime Type slot: "... / opus (251)" → "... / opus (774)"
       return '/ opus (774)';
     },
 
@@ -3280,27 +3293,95 @@
       if (this.initialized) return;
       this.initialized = true;
       this.hookPlayerAPI();
-      this.startDOMCheck();
-      console.log(TAG, '[StatsForNerds] Override & Spoofing Engine Active (Conditional on Real 774)');
+      this.mountClassicShell();
+      if (this.timer) return;
+      this.timer = setInterval(() => {
+        this.patchModernSfn();
+        if (this.visible) this.render();
+      }, 500);
+      console.log(TAG, '[StatsForNerds] ready (native panel kept)');
     },
 
+    isReal774() {
+      return S.enabled
+        && status.activeAudioItag === 774
+        && !status.fallbackReason;
+    },
+
+    // Forward: 251/140 → 774 when Studio 774 is live.
+    // Reverse: stamped 774 → real itag when it is not (video switch / fallback).
+    rewriteStatText(txt, forward, realItag) {
+      if (typeof txt !== 'string' || !txt) return txt;
+      let out = txt;
+      if (forward) {
+        if (out.includes('774')) return out;
+        if (/\(\s*\d+\s*\/\s*(?:251|140)\s*\)/.test(out)) {
+          out = out.replace(/\(\s*(\d+)\s*\/\s*(?:251|140)\s*\)/, '($1/774)');
+        } else if (/\/\s*[\w.-]+\s*\(\s*(?:251|140)\s*\)/.test(out)) {
+          out = out.replace(/\/\s*[\w.-]+\s*\(\d+\)/, '/ opus (774)');
+        } else if (/^\s*(251|140)\s*$/.test(out)) {
+          out = out.replace(/\b(?:251|140)\b/, '774');
+        }
+        return out;
+      }
+      // reverse only values we stamped
+      if (!out.includes('774')) return out;
+      const itag = realItag || 251;
+      if (/\(\s*\d+\s*\/\s*774\s*\)/.test(out)) {
+        out = out.replace(/\(\s*(\d+)\s*\/\s*774\s*\)/, `($1/${itag})`);
+      }
+      if (/\/\s*opus\s*\(\s*774\s*\)/.test(out)) {
+        out = out.replace(/\/\s*opus\s*\(\s*774\s*\)/, `/ opus (${itag})`);
+      }
+      if (/^\s*774\s*$/.test(out)) {
+        out = String(itag);
+      }
+      return out;
+    },
+
+    patchStatsObject(stats) {
+      if (!stats || typeof stats !== 'object' || Array.isArray(stats)) return stats;
+      const forward = this.isReal774() && !!(S.shadowPlayer || S.sfnSpoof);
+      const realItag = Number(status.activeAudioItag) || 251;
+      // Do not mutate a possibly-cached object in place when only reversing
+      let dirty = false;
+      const out = { ...stats };
+      for (const key of Object.keys(out)) {
+        const val = out[key];
+        if (typeof val !== 'string') continue;
+        const next = this.rewriteStatText(val, forward, realItag);
+        if (next !== val) {
+          out[key] = next;
+          dirty = true;
+        }
+      }
+      return dirty ? out : stats;
+    },
+
+    // Same as packed CRX: patch every string field, DASH (n/251), V3 getters
     hookPlayerAPI() {
       const tryHook = () => {
-        const player = document.getElementById('movie_player');
+        const player = document.getElementById('movie_player')
+          || document.querySelector('.html5-video-player');
         if (!player || player._ytssStatsHooked) return;
         player._ytssStatsHooked = true;
+        const self = this;
 
         if (typeof player.getStatsForNerds === 'function') {
           const origStats = player.getStatsForNerds;
-          const self = this;
           player.getStatsForNerds = function () {
-            const stats = origStats.apply(this, arguments) || {};
-            const override = self.getCodecText();
-            if ((S.shadowPlayer || S.sfnSpoof) && override && stats && stats.codecs) {
-              stats.codecs = stats.codecs.replace(/\/\s*[\w.-]+\s*\(\d+\)/, override);
-            }
-            return stats;
+            return self.patchStatsObject(origStats.apply(this, arguments) || {});
           };
+        }
+        for (const name of ['getVideoInfo', 'getDebugInfo', 'getStats']) {
+          if (typeof player[name] === 'function' && !player['_ytss' + name]) {
+            const orig = player[name];
+            player['_ytss' + name] = true;
+            player[name] = function () {
+              const out = orig.apply(this, arguments);
+              return (out && typeof out === 'object' && !Array.isArray(out)) ? self.patchStatsObject(out) : out;
+            };
+          }
         }
       };
 
@@ -3308,26 +3389,277 @@
       setInterval(tryHook, 2000);
     },
 
-    startDOMCheck() {
-      if (this.timer) return;
-      this.timer = setInterval(() => {
-        if (document.hidden) return;
-        if (!S.shadowPlayer && !S.sfnSpoof) return;
-        const override = this.getCodecText();
-        if (!override) return;
+    // Walk visible SFN panel. Forward when 774 live; reverse stale stamps otherwise.
+    patchModernSfn() {
+      if (document.hidden) return;
+      if (!S.enabled) return;
+      const panel = document.querySelector(
+        '.html5-video-info-panel-content, .ytp-sfn-content, .html5-video-info-panel, #movie_player .html5-video-info-panel-content'
+      );
+      if (!panel) return;
 
-        const panel = document.querySelector('.html5-video-info-panel-content, .ytp-sfn-content');
-        if (!panel) return;
+      const forward = this.isReal774() && !!(S.shadowPlayer || S.sfnSpoof);
+      const realItag = Number(status.activeAudioItag) || 251;
+      // When neither direction applies, still reverse (e.g. spoof off but 774 stamped)
+      const doForward = forward;
+      const doReverse = !forward;
 
-        const walker = document.createTreeWalker(panel, NodeFilter.SHOW_TEXT, null, false);
-        let node;
-        while ((node = walker.nextNode())) {
-          const txt = node.nodeValue || '';
-          if (txt.includes('/') && (txt.includes('opus (') || txt.includes('mp4a.') || txt.includes('251') || txt.includes('140')) && !txt.includes('774')) {
-            node.nodeValue = txt.replace(/\/\s*[\w.-]+\s*\(\d+\)/, override);
+      const walker = document.createTreeWalker(panel, NodeFilter.SHOW_TEXT, null, false);
+      let node;
+      while ((node = walker.nextNode())) {
+        const txt = node.nodeValue || '';
+        if (!txt) continue;
+        if (doForward) {
+          if (txt.includes('774')) continue;
+          if (!(S.shadowPlayer || S.sfnSpoof)) continue;
+          const next = this.rewriteStatText(txt, true, realItag);
+          if (next !== txt) node.nodeValue = next;
+        } else if (doReverse) {
+          if (!txt.includes('774')) continue;
+          const next = this.rewriteStatText(txt, false, realItag);
+          if (next !== txt) node.nodeValue = next;
+        }
+      }
+    },
+
+    // Prefer classic 2014 overlay; only try native if classic host is missing
+    openNativeOrClassic() {
+      const host = this.hostEl();
+      if (host) {
+        this.mountClassicShell();
+        this.toggle();
+        return;
+      }
+      const player = document.getElementById('movie_player');
+      if (player && typeof player.setOption === 'function') {
+        try {
+          let vis = true;
+          try { vis = !!player.getOption('stats', 'visible'); } catch (e) { vis = true; }
+          player.setOption('stats', 'visible', !vis);
+          return;
+        } catch (e) { }
+      }
+      const sfn = document.querySelector('.ytp-sfn, .ytp-sfn-container');
+      if (sfn) {
+        const hidden = sfn.getAttribute('hidden') !== null
+          || sfn.style.display === 'none'
+          || getComputedStyle(sfn).display === 'none';
+        if (hidden) {
+          sfn.removeAttribute('hidden');
+          sfn.style.display = '';
+        } else {
+          sfn.setAttribute('hidden', '');
+          sfn.style.display = 'none';
+        }
+      }
+    },
+
+    // Alias: same DOM walk covers V3 .html5-video-info-panel
+    patchV3InfoPanel() {
+      this.patchModernSfn();
+    },
+
+    hostEl() {
+      return document.querySelector('.html5-video-player')
+        || document.getElementById('movie_player')
+        || document.querySelector('video.html5-main-video')?.parentElement;
+    },
+
+    mountClassicShell() {
+      const host = this.hostEl();
+      if (!host) return;
+      if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+
+      let panel = document.getElementById('ytss-sfn');
+      if (panel) {
+        if (panel.parentElement !== host) host.appendChild(panel);
+        return;
+      }
+
+      panel = document.createElement('div');
+      panel.id = 'ytss-sfn';
+      panel.style.cssText = [
+        'display:none', 'position:absolute', 'top:8px', 'left:8px', 'z-index:100000',
+        'min-width:340px', 'max-width:420px', 'background:rgba(20,4,4,0.92)',
+        'border:1px solid #5a1010', 'border-radius:3px', 'padding:8px 10px 10px',
+        'font:11px/1.35 Arial,Helvetica,sans-serif', 'color:#eee',
+        'box-shadow:0 2px 10px rgba(0,0,0,.55)', 'user-select:none'
+      ].join(';');
+
+      const head = document.createElement('div');
+      head.style.cssText = 'position:relative;margin:0 0 6px;font-weight:700;color:#ffb84d;font-size:12px;';
+      head.textContent = 'Stats for nerds';
+      const close = document.createElement('span');
+      close.textContent = '[x]';
+      close.style.cssText = 'position:absolute;right:0;top:0;cursor:pointer;color:#ccc;font-weight:400;';
+      close.onclick = () => this.toggle(false);
+      head.appendChild(close);
+      panel.appendChild(head);
+
+      const body = document.createElement('div');
+      body.id = 'ytss-sfn-body';
+      panel.appendChild(body);
+
+      // Classic frame/bytes table
+      const table = document.createElement('table');
+      table.style.cssText = 'width:100%;border-collapse:collapse;margin-top:6px;font-size:10px;';
+      table.innerHTML = [
+        '<tr>',
+        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Decoded Frames</th>',
+        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Dropped Frames</th>',
+        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Parsed Frames</th>',
+        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Presented Frames</th>',
+        '</tr>',
+        '<tr id="ytss-sfn-frames">',
+        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+        '</tr>',
+        '<tr>',
+        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Video Bytes Decoded</th>',
+        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Audio Bytes Decoded</th>',
+        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Painted Frames</th>',
+        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Paint Delay</th>',
+        '</tr>',
+        '<tr id="ytss-sfn-bytes">',
+        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+        '</tr>'
+      ].join('');
+      panel.appendChild(table);
+
+      if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+      host.appendChild(panel);
+    },
+
+    row(label, value) {
+      return `<div style="margin:1px 0;"><span style="display:inline-block;width:110px;color:#ffb84d;">${label}:</span><span data-v>${value}</span></div>`;
+    },
+
+    sampleVideoStats(v) {
+      if (!v) return;
+      const now = performance.now();
+      if (!this._lastTs) { this._lastTs = now; this._lastTime = v.currentTime || 0; return; }
+      const dt = (now - this._lastTs) / 1000;
+      const dTime = Math.abs((v.currentTime || 0) - this._lastTime);
+      if (dt > 0.4 && dTime > 0.01 && v.readyState >= 2) {
+        // rough fps ~25-60; use decodedVideoFrames if available
+        const q = typeof v.getVideoPlaybackQuality === 'function' ? v.getVideoPlaybackQuality() : null;
+        if (q) {
+          this._frames.decoded = q.totalVideoFrames || this._frames.decoded;
+          this._frames.dropped = q.droppedVideoFrames || 0;
+          this._frames.presented = q.totalVideoFrames || 0;
+        } else {
+          this._frames.decoded += Math.round(dTime * 25);
+        }
+        this._frames.parsed = this._frames.decoded;
+        this._painted = this._frames.decoded;
+        // bytes: video.webkitVideoDecodedByteCount / audio.webkitAudioDecodedByteCount (Chromium)
+        if (typeof v.webkitVideoDecodedByteCount === 'number') this._bytes.video = v.webkitVideoDecodedByteCount;
+        else this._bytes.video += Math.round(dTime * 1500000);
+        if (typeof v.webkitAudioDecodedByteCount === 'number') this._bytes.audio = v.webkitAudioDecodedByteCount;
+        else this._bytes.audio += Math.round(dTime * 32000);
+        this._lastTs = now;
+        this._lastTime = v.currentTime || 0;
+      }
+    },
+
+    bandwidthKbps(v) {
+      const now = performance.now();
+      if (v.buffered && v.buffered.length) {
+        const end = v.buffered.end(v.buffered.length - 1);
+        // crude sliding estimate from buffer growth
+        this._bwSamples.push({ t: now, end });
+        while (this._bwSamples.length > 2 && now - this._bwSamples[0].t > 5000) this._bwSamples.shift();
+        if (this._bwSamples.length >= 2) {
+          const a = this._bwSamples[0], b = this._bwSamples[this._bwSamples.length - 1];
+          const dt = (b.t - a.t) / 1000;
+          if (dt > 0.5) {
+            const kbps = Math.max(0, ((b.end - a.end) * 8) / dt);
+            return Math.round(kbps);
           }
         }
-      }, 1000);
+      }
+      return 17222; // classic default look when idle
+    },
+
+    render() {
+      const panel = document.getElementById('ytss-sfn');
+      const body = document.getElementById('ytss-sfn-body');
+      if (!panel || !body) return;
+      this.mountClassicShell();
+      const v = getMainVideoElement();
+      const player = document.getElementById('movie_player');
+      const data = player?.getVideoData?.() || {};
+      this.sampleVideoStats(v);
+
+      const videoId = data.video_id || getVideoIdFromUrl() || '—';
+      const vw = v?.videoWidth || 0;
+      const vh = v?.videoHeight || 0;
+      const scale = (v && vw) ? (v.clientWidth / vw) : 1;
+      const dimensions = vw ? `${vw} x ${vh} * ${scale.toFixed(2)}` : '—';
+      const resLabel = vw ? `${window.screen.width} x ${window.screen.height}@25` : '—';
+      const vol = v ? Math.round((v.volume ?? 1) * 100) + '%' : '100%';
+      const streamType = (v?.currentSrc || '').startsWith('blob:') ? 'https' : ((v?.currentSrc || '').split(':')[0] || 'https');
+      const cpn = window.ytcfg?.get?.('CPN') || data.cpn || 'QJTxVlhaG-bwJEh2';
+      const audioItag = Number(status.activeAudioItag) || 251;
+      const is774 = audioItag === 774 && !status.fallbackReason;
+      const mime = is774
+        ? 'audio/webm; codecs="opus"'
+        : (data.playerResponse?.streamingData?.adaptiveFormats?.find?.(f => f.itag === 251 || f.itag === 140)?.mimeType || 'audio/webm; codecs="opus"');
+      const dash = `yes (${is774 ? 399 : 399}/${audioItag})`;
+      const bw = this.bandwidthKbps(v);
+
+      body.innerHTML = [
+        this.row('Video ID', videoId),
+        this.row('Dimensions', dimensions),
+        this.row('Resolution', resLabel),
+        this.row('Volume', vol),
+        this.row('Stream Type', streamType),
+        this.row('CPN', cpn),
+        this.row('Mime Type', mime),
+        this.row('DASH', `<span style="color:${is774 ? '#ff4d4d' : '#eee'}">${dash}</span>`),
+        `<div style="margin:3px 0 0;"><span style="display:inline-block;width:110px;color:#ffb84d;">Bandwidth:</span>`,
+        `<span style="display:inline-block;width:120px;height:8px;border:1px solid #666;vertical-align:middle;margin-right:6px;">`,
+        `<span style="display:block;height:100%;width:${Math.min(100, bw / 200)}%;background:#c9a227;"></span></span>`,
+        `<span>${bw} Kbps</span></div>`
+      ].join('');
+
+      const fr = document.getElementById('ytss-sfn-frames');
+      const by = document.getElementById('ytss-sfn-bytes');
+      if (fr) {
+        const tds = fr.children;
+        tds[0].textContent = this._frames.decoded || '-';
+        tds[1].textContent = this._frames.dropped || '-';
+        tds[2].textContent = this._frames.parsed || '-';
+        tds[3].textContent = this._frames.presented || '-';
+      }
+      if (by) {
+        const tds = by.children;
+        tds[0].textContent = this._bytes.video || '-';
+        tds[1].textContent = this._bytes.audio || '-';
+        tds[2].textContent = this._painted || '-';
+        tds[3].textContent = '-';
+      }
+
+      // keep panel mounted on current player
+      const host = this.hostEl();
+      if (host && panel.parentElement !== host) {
+        if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+        host.appendChild(panel);
+      }
+    },
+
+    toggle(force) {
+      this.mountClassicShell();
+      const panel = document.getElementById('ytss-sfn');
+      if (!panel) return;
+      this.visible = typeof force === 'boolean' ? force : !this.visible;
+      panel.style.display = this.visible ? 'block' : 'none';
+      if (this.visible) this.render();
     }
   };
 
@@ -3443,6 +3775,404 @@
   };
 
   // ═══════════════════════════════════════════════════════════════════
+  // IN-PLAYER HUD I18N + QUICK SETTINGS MENU (ported from packed CRX)
+  // ═══════════════════════════════════════════════════════════════════
+  const HUD_I18N = {
+    vi: {
+      badge_title_settings: 'YTSpoofingStream — Nhấn để mở menu',
+      badge_title_off: 'YTSpoofingStream (Đã tắt) — Nhấn để mở menu',
+      badge_title_141: 'Studio Master AAC 141 — Nhấn để mở menu',
+      badge_title_774: 'HQ Opus 774 — Nhấn để mở menu',
+      badge_title_native: 'Native Audio (ITAG 251) — Nhấn để mở menu',
+      close_title: 'Đóng',
+      master_en: 'Kích hoạt Studio 774',
+      audio_mode_header: 'Chế độ âm thanh',
+      mode_hybrid: '★ Hybrid Mix (Tối ưu)',
+      mode_ytm: 'YouTube Music (774)',
+      mode_tv: 'Smart TV Relay (774)',
+      sfn_title: 'Stats for Nerds (774)',
+      open_sfn: 'Mở Stats for Nerds',
+      status_off: 'Đã tắt (Native)',
+      status_fallback: 'ITAG {itag} Dự phòng',
+      btn_reload: '⟳ Tải lại',
+    },
+    en: {
+      badge_title_settings: 'YTSpoofingStream — Click to open menu',
+      badge_title_off: 'YTSpoofingStream (Disabled) — Click to open menu',
+      badge_title_141: 'Studio Master AAC 141 — Click to open menu',
+      badge_title_774: 'HQ Opus 774 — Click to open menu',
+      badge_title_native: 'Native Audio (ITAG 251) — Click to open menu',
+      close_title: 'Close',
+      master_en: 'Enable Studio 774',
+      audio_mode_header: 'Audio Mode',
+      mode_hybrid: '★ Hybrid Mix (Optimal)',
+      mode_ytm: 'YouTube Music (774)',
+      mode_tv: 'Smart TV Relay (774)',
+      sfn_title: 'Stats for Nerds (774)',
+      open_sfn: 'Open Stats for Nerds',
+      status_off: 'Disabled (Native)',
+      status_fallback: 'ITAG {itag} Fallback',
+      btn_reload: '⟳ Reload',
+    }
+  };
+
+  function hudT(key, vars = {}) {
+    const lang = S.lang || 'vi';
+    let str = HUD_I18N[lang]?.[key] || HUD_I18N.en?.[key] || key;
+    for (const [k, v] of Object.entries(vars || {})) {
+      str = str.replace(new RegExp(`\\{${k}\\}`, 'g'), v);
+    }
+    return str;
+  }
+
+  const InPlayerSettingsUI = {
+    panel: null,
+    isOpen: false,
+    eventsHooked: false,
+    refs: null,
+
+    init() {
+      this.injectStyles();
+      if (!this.panel) this.createPanel();
+      if (!this.eventsHooked) {
+        this.bindGlobalEvents();
+        this.eventsHooked = true;
+      }
+    },
+
+    injectStyles() {
+      if (document.getElementById('ytss-inplayer-style')) return;
+      const st = document.createElement('style');
+      st.id = 'ytss-inplayer-style';
+      st.textContent = `
+        .ytss-interactive-row { transition: background 0.15s ease, transform 0.1s ease; }
+        .ytss-interactive-row:hover { background: rgba(255,255,255,0.1) !important; }
+        .ytss-interactive-row:active { transform: scale(0.99); }
+        #ytss-btn-reload:hover { background: rgba(255,255,255,0.18) !important; color: #fff !important; }
+        #ytss-hud-lang-toggle:hover { background: rgba(255,255,255,0.22) !important; border-color: rgba(255,255,255,0.4) !important; }
+        #ytss-panel-close:hover { background: rgba(255,255,255,0.15) !important; color: #fff !important; }
+      `;
+      (document.head || document.documentElement).appendChild(st);
+    },
+
+    createPanel() {
+      const existing = document.getElementById('ytss-quick-settings');
+      if (existing) { this.panel = existing; return; }
+
+      const panel = document.createElement('div');
+      panel.id = 'ytss-quick-settings';
+      panel.setAttribute('role', 'dialog');
+      panel.setAttribute('aria-label', 'YTSpoofingStream Quick Settings');
+      panel.style.cssText = [
+        'position:absolute', 'bottom:56px', 'right:12px', 'width:240px',
+        'background:rgba(24,24,24,0.96)', 'backdrop-filter:blur(16px)', '-webkit-backdrop-filter:blur(16px)',
+        'border:1px solid rgba(255,255,255,0.1)', 'border-radius:10px',
+        'box-shadow:0 8px 28px rgba(0,0,0,0.75)', 'color:#f1f1f1',
+        'font-family:"YouTube Noto",Roboto,Arial,Helvetica,sans-serif', 'font-size:11.5px', 'line-height:1.3',
+        'z-index:2147483640', 'user-select:none', 'overflow:hidden',
+        'opacity:0', 'pointer-events:none', 'transform:translateY(6px) scale(0.98)',
+        'transition:opacity .16s cubic-bezier(.2,0,.2,1),transform .16s cubic-bezier(.2,0,.2,1)'
+      ].join(';');
+
+      ['click','mousedown','mouseup','pointerdown','dblclick','contextmenu','keydown','keypress','keyup']
+        .forEach((evt) => panel.addEventListener(evt, (e) => e.stopPropagation()));
+
+      const header = document.createElement('div');
+      header.style.cssText = 'padding:8px 12px 6px;border-bottom:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:space-between;';
+      const headerLeft = document.createElement('div');
+      headerLeft.style.cssText = 'display:flex;align-items:center;gap:6px;';
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('width', '16'); svg.setAttribute('height', '16'); svg.setAttribute('viewBox', '0 0 24 24');
+      svg.style.flexShrink = '0';
+      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      rect.setAttribute('width', '24'); rect.setAttribute('height', '24'); rect.setAttribute('rx', '5'); rect.setAttribute('fill', '#e94560');
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', 'M8 6L18 12L8 18Z'); path.setAttribute('fill', '#fff');
+      svg.append(rect, path);
+      const titleSpan = document.createElement('span');
+      titleSpan.style.cssText = 'font-size:12px;font-weight:700;color:#fff;letter-spacing:0.2px;';
+      titleSpan.textContent = 'ytspoofingstream (vorapis edition)';
+      headerLeft.append(svg, titleSpan);
+
+      const headerRight = document.createElement('div');
+      headerRight.style.cssText = 'display:flex;align-items:center;gap:6px;';
+      const langToggle = document.createElement('button');
+      langToggle.id = 'ytss-hud-lang-toggle';
+      langToggle.style.cssText = 'background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.18);color:#fff;font-size:9px;font-weight:800;cursor:pointer;padding:2px 7px;border-radius:10px;line-height:1.2;transition:all .15s;font-family:inherit;';
+      langToggle.textContent = S.lang === 'en' ? 'EN' : 'VI';
+      langToggle.onclick = (e) => {
+        e.stopPropagation();
+        this.saveSetting('lang', S.lang === 'en' ? 'vi' : 'en');
+      };
+      const closeBtn = document.createElement('button');
+      closeBtn.id = 'ytss-panel-close';
+      closeBtn.style.cssText = 'background:none;border:none;color:#888;font-size:14px;cursor:pointer;padding:1px 5px;border-radius:4px;line-height:1;transition:all .15s;';
+      closeBtn.textContent = '✕';
+      closeBtn.onclick = () => this.close();
+      headerRight.append(langToggle, closeBtn);
+      header.append(headerLeft, headerRight);
+      panel.appendChild(header);
+
+      const body = document.createElement('div');
+      body.style.cssText = 'padding:6px 8px;display:flex;flex-direction:column;gap:3px;';
+
+      const rowEn = document.createElement('div');
+      rowEn.id = 'ytss-row-en';
+      rowEn.className = 'ytss-interactive-row';
+      rowEn.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:6px;cursor:pointer;';
+      const enTitle = document.createElement('span');
+      enTitle.style.cssText = 'font-size:11.5px;font-weight:600;color:#fff;';
+      enTitle.textContent = hudT('master_en');
+      const enTrack = document.createElement('div');
+      enTrack.style.cssText = 'width:34px;height:18px;border-radius:9px;position:relative;transition:background .2s;flex-shrink:0;';
+      const enKnob = document.createElement('div');
+      enKnob.style.cssText = 'width:14px;height:14px;border-radius:50%;background:#fff;position:absolute;top:2px;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.4);';
+      enTrack.appendChild(enKnob);
+      rowEn.append(enTitle, enTrack);
+      rowEn.onclick = () => this.saveSetting('enabled', !S.enabled);
+      body.appendChild(rowEn);
+
+      const div1 = document.createElement('div');
+      div1.style.cssText = 'height:1px;background:rgba(255,255,255,0.07);margin:2px 0;';
+      body.appendChild(div1);
+
+      const modeHeader = document.createElement('div');
+      modeHeader.style.cssText = 'font-size:9px;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:0.5px;padding:2px 6px 1px;';
+      modeHeader.textContent = hudT('audio_mode_header');
+      body.appendChild(modeHeader);
+
+      const createModeRow = (id, titleKey, opModeVal) => {
+        const row = document.createElement('div');
+        row.id = id;
+        row.className = 'ytss-interactive-row';
+        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:5px 8px;border-radius:5px;cursor:pointer;transition:all .15s;';
+        const tSpan = document.createElement('span');
+        tSpan.style.cssText = 'font-size:11px;';
+        tSpan.textContent = hudT(titleKey);
+        const check = document.createElement('span');
+        check.style.cssText = 'color:#e94560;font-weight:bold;font-size:12px;';
+        row.append(tSpan, check);
+        row.onclick = () => this.saveSetting('operationMode', opModeVal);
+        return { row, tSpan, check, titleKey };
+      };
+      const mHybrid = createModeRow('ytss-mode-hybrid', 'mode_hybrid', 'HYBRID_HQ');
+      const mYtm = createModeRow('ytss-mode-ytm', 'mode_ytm', 'YTM_HARVESTER');
+      const mTv = createModeRow('ytss-mode-tv', 'mode_tv', 'TV_HEADLESS');
+      body.append(mHybrid.row, mYtm.row, mTv.row);
+
+      const div2 = document.createElement('div');
+      div2.style.cssText = 'height:1px;background:rgba(255,255,255,0.07);margin:2px 0;';
+      body.appendChild(div2);
+
+      const rowSfn = document.createElement('div');
+      rowSfn.id = 'ytss-row-sfn';
+      rowSfn.className = 'ytss-interactive-row';
+      rowSfn.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:5px 8px;border-radius:6px;cursor:pointer;';
+      const sfnTitle = document.createElement('span');
+      sfnTitle.style.cssText = 'font-size:11px;font-weight:500;color:#ddd;';
+      sfnTitle.textContent = hudT('sfn_title');
+      const sfnTrack = document.createElement('div');
+      sfnTrack.style.cssText = 'width:32px;height:18px;border-radius:9px;position:relative;transition:background .2s;flex-shrink:0;';
+      const sfnKnob = document.createElement('div');
+      sfnKnob.style.cssText = 'width:14px;height:14px;border-radius:50%;background:#fff;position:absolute;top:2px;transition:left .2s;box-shadow:0 1px 2px rgba(0,0,0,.4);';
+      sfnTrack.appendChild(sfnKnob);
+      rowSfn.append(sfnTitle, sfnTrack);
+      rowSfn.onclick = () => this.saveSetting('shadowPlayer', !S.shadowPlayer);
+      body.appendChild(rowSfn);
+
+      // Open native/classic Stats for Nerds
+      const rowOpenSfn = document.createElement('div');
+      rowOpenSfn.id = 'ytss-row-open-sfn';
+      rowOpenSfn.className = 'ytss-interactive-row';
+      rowOpenSfn.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:5px 8px;border-radius:6px;cursor:pointer;';
+      const openSfnTitle = document.createElement('span');
+      openSfnTitle.style.cssText = 'font-size:11px;color:#3ea6ff;font-weight:600;';
+      openSfnTitle.textContent = hudT('open_sfn');
+      rowOpenSfn.append(openSfnTitle);
+      rowOpenSfn.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.close();
+        // Always show our classic 2014 Stats for Nerds panel
+        if (typeof StatsForNerdsSpoofer !== 'undefined') {
+          StatsForNerdsSpoofer.mountClassicShell();
+          StatsForNerdsSpoofer.toggle(true);
+        }
+      };
+      body.appendChild(rowOpenSfn);
+
+      const footer = document.createElement('div');
+      footer.style.cssText = 'margin-top:4px;padding:5px 8px;border-radius:6px;background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.06);font-size:10px;display:flex;align-items:center;justify-content:space-between;';
+      const statusDiv = document.createElement('div');
+      statusDiv.style.cssText = 'display:flex;align-items:center;gap:5px;overflow:hidden;white-space:nowrap;';
+      const statusDot = document.createElement('span');
+      statusDot.style.cssText = 'width:6px;height:6px;border-radius:50%;flex-shrink:0;background:#666;';
+      const statusText = document.createElement('span');
+      statusText.style.cssText = 'font-weight:600;font-size:10px;color:#aaa;text-overflow:ellipsis;overflow:hidden;';
+      statusText.textContent = '—';
+      statusDiv.append(statusDot, statusText);
+      const btnReload = document.createElement('button');
+      btnReload.id = 'ytss-btn-reload';
+      btnReload.style.cssText = 'padding:2px 7px;border-radius:4px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#ddd;font-size:9.5px;font-weight:600;cursor:pointer;transition:all .15s;font-family:inherit;white-space:nowrap;flex-shrink:0;';
+      btnReload.textContent = hudT('btn_reload');
+      btnReload.onclick = () => {
+        const player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+        const vid = player?.getVideoData?.()?.video_id;
+        const time = player?.getCurrentTime?.() || 0;
+        if (vid && typeof player.loadVideoById === 'function') {
+          player.loadVideoById(vid, time);
+          this.close();
+          return;
+        }
+        location.reload();
+      };
+      footer.append(statusDiv, btnReload);
+      body.appendChild(footer);
+      panel.appendChild(body);
+
+      this.refs = { langToggle, closeBtn, enTitle, enTrack, enKnob, modeHeader, mHybrid, mYtm, mTv, sfnTitle, sfnTrack, sfnKnob, openSfnTitle, statusDot, statusText, btnReload };
+      this.panel = panel;
+      this.attachToPlayer();
+    },
+
+    attachToPlayer() {
+      if (!this.panel) return;
+      const player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+      if (player && this.panel.parentElement !== player) {
+        if (getComputedStyle(player).position === 'static') player.style.position = 'relative';
+        player.appendChild(this.panel);
+      } else if (!player && document.body && !document.body.contains(this.panel)) {
+        document.body.appendChild(this.panel);
+      }
+    },
+
+    bindGlobalEvents() {
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && this.isOpen) this.close();
+      });
+      document.addEventListener('click', (e) => {
+        if (!this.isOpen || !this.panel) return;
+        const container = document.getElementById('ytss-vol-container') || document.getElementById('ytss-badge-bar');
+        const target = e.target;
+        if (target instanceof Node && !this.panel.contains(target) && (!container || !container.contains(target))) {
+          this.close();
+        }
+      });
+      document.addEventListener('fullscreenchange', () => { if (this.isOpen) setTimeout(() => this.position(), 80); });
+      window.addEventListener('resize', () => { if (this.isOpen) this.position(); });
+    },
+
+    toggle() {
+      if (this.isOpen) this.close();
+      else this.open();
+    },
+
+    open() {
+      if (!this.panel) this.createPanel();
+      this.attachToPlayer();
+      this.render();
+      this.position();
+      this.panel.style.opacity = '1';
+      this.panel.style.pointerEvents = 'auto';
+      this.panel.style.transform = 'translateY(0) scale(1)';
+      this.isOpen = true;
+    },
+
+    close() {
+      if (!this.panel || !this.isOpen) return;
+      this.panel.style.opacity = '0';
+      this.panel.style.pointerEvents = 'none';
+      this.panel.style.transform = 'translateY(6px) scale(0.98)';
+      this.isOpen = false;
+    },
+
+    position() {
+      if (!this.panel) return;
+      const player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+      const container = document.getElementById('ytss-badge-bar') || document.getElementById('ytss-vol-container');
+      if (!player) return;
+      if (container) {
+        const playerRect = player.getBoundingClientRect();
+        const btnRect = container.getBoundingClientRect();
+        const rightPx = Math.max(12, playerRect.right - btnRect.right - 10);
+        const bottomPx = Math.max(54, playerRect.bottom - btnRect.top + 8);
+        this.panel.style.right = `${Math.min(Math.max(12, playerRect.width - 260), Math.max(12, rightPx))}px`;
+        this.panel.style.bottom = `${bottomPx}px`;
+      } else {
+        this.panel.style.right = '16px';
+        this.panel.style.bottom = '56px';
+      }
+    },
+
+    saveSetting(key, val) {
+      S[key] = val;
+      persistSettings();
+      window.postMessage({ type: 'YTSS_SAVE_SETTINGS', settings: pickSettings(S) }, '*');
+      if (key === 'lang') {
+        this.render();
+        PlayerBadgeUI.update();
+        return;
+      }
+      if (typeof handleSettingsChange === 'function') handleSettingsChange();
+      this.render();
+      PlayerBadgeUI.update();
+    },
+
+    render() {
+      if (!this.panel || !this.refs) return;
+      const itag = Number(status.activeAudioItag);
+      const isHq = (itag === 774 || itag === 141) && !status.fallbackReason;
+      const mode = S.operationMode || 'HYBRID_HQ';
+      const isEn = !!S.enabled;
+      const isSfn = !!S.shadowPlayer;
+      const { langToggle, closeBtn, enTitle, enTrack, enKnob, modeHeader, mHybrid, mYtm, mTv, sfnTitle, sfnTrack, sfnKnob, openSfnTitle, statusDot, statusText, btnReload } = this.refs;
+
+      if (langToggle) langToggle.textContent = S.lang === 'en' ? 'EN' : 'VI';
+      if (closeBtn) closeBtn.title = hudT('close_title');
+      if (enTitle) enTitle.textContent = hudT('master_en');
+      if (modeHeader) modeHeader.textContent = hudT('audio_mode_header');
+      if (mHybrid?.tSpan) mHybrid.tSpan.textContent = hudT(mHybrid.titleKey);
+      if (mYtm?.tSpan) mYtm.tSpan.textContent = hudT(mYtm.titleKey);
+      if (mTv?.tSpan) mTv.tSpan.textContent = hudT(mTv.titleKey);
+      if (sfnTitle) sfnTitle.textContent = hudT('sfn_title');
+      if (openSfnTitle) openSfnTitle.textContent = hudT('open_sfn');
+      if (btnReload) btnReload.textContent = hudT('btn_reload');
+
+      enTrack.style.background = isEn ? '#e94560' : '#444';
+      enKnob.style.left = isEn ? '18px' : '2px';
+
+      const updateModeItem = (item, active) => {
+        item.row.style.background = active ? 'rgba(233,69,96,0.15)' : 'transparent';
+        item.row.style.border = active ? '1px solid rgba(233,69,96,0.35)' : '1px solid transparent';
+        item.tSpan.style.fontWeight = active ? '700' : '500';
+        item.tSpan.style.color = active ? '#fff' : '#aaa';
+        item.check.textContent = active ? '✓' : '';
+      };
+      updateModeItem(mHybrid, mode === 'HYBRID_HQ');
+      updateModeItem(mYtm, mode === 'YTM_HARVESTER');
+      updateModeItem(mTv, mode === 'TV_HEADLESS');
+
+      sfnTrack.style.background = isSfn ? '#3ea6ff' : '#444';
+      sfnKnob.style.left = isSfn ? '16px' : '2px';
+
+      if (!isEn) {
+        statusDot.style.background = '#666';
+        statusText.style.color = '#888';
+        statusText.textContent = hudT('status_off');
+      } else if (isHq) {
+        statusDot.style.background = itag === 141 ? '#00e5ff' : '#ff334b';
+        statusText.style.color = itag === 141 ? '#00e5ff' : '#ff334b';
+        const methodShort = status.activeMethod === 'YTM_HARVESTER' ? 'YTM' : (status.activeMethod || 'HQ');
+        statusText.textContent = `${itag === 141 ? '★ 141 AAC' : '★ 774 Opus'} • ${methodShort}`;
+      } else {
+        statusDot.style.background = '#aaa';
+        statusText.style.color = '#aaa';
+        statusText.textContent = hudT('status_fallback', { itag: itag || 251 });
+      }
+    }
+  };
+
+  // ═══════════════════════════════════════════════════════════════════
   // IN-PLAYER HUD BADGE UI (Shows ★ 774 or 251 directly inside YouTube Controls)
   // ═══════════════════════════════════════════════════════════════════
   const PlayerBadgeUI = {
@@ -3450,9 +4180,85 @@
       if (!S.enabled) {
         const container = document.getElementById('ytss-vol-container');
         if (container) container.style.display = 'none';
+        const bar = document.getElementById('ytss-badge-bar');
+        if (bar) bar.style.display = 'none';
+        const under = document.getElementById('ytss-badge-under');
+        if (under) under.remove();
         return;
       }
 
+      this.injectControlBarBadge();
+      // Modern YouTube fallback only if V3 chrome badge not present
+      if (!document.getElementById('ytss-badge-bar')) this.injectInControls();
+      this.update();
+    },
+
+    // V3: chip immediately after the time display (0:12 / 2:59)
+    injectControlBarBadge() {
+      const chrome = document.querySelector('.html5-player-chrome');
+      if (!chrome) return;
+
+      document.getElementById('ytss-badge-under')?.remove();
+      document.getElementById('ytss-badge-chrome')?.remove();
+
+      const left = chrome.querySelector('.left') || chrome;
+      const time = left.querySelector('.ytp-time-display')
+        || left.querySelector('.ytp-time-current')
+        || left.querySelector('[class*="time"]');
+
+      let badge = document.getElementById('ytss-badge-bar');
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.id = 'ytss-badge-bar';
+        badge.className = 'ytss-bar-badge';
+        badge.title = 'YTSS audio itag — click: Stats for nerds';
+        badge.textContent = '251';
+        badge.addEventListener('click', (e) => {
+          e.stopPropagation();
+          InPlayerSettingsUI.toggle();
+        });
+      }
+
+      // Match .ytp-time-display (line-height: 28px) so centers line up
+      badge.style.cssText = [
+        'display:inline-flex',
+        'align-items:center',
+        'justify-content:center',
+        'height:28px',
+        'line-height:28px',
+        'padding:0 5px',
+        'margin:0 0 0 8px',
+        'box-sizing:border-box',
+        'background:transparent',
+        'border:1px solid rgba(225,29,29,0.5)',
+        'border-radius:2px',
+        'font:700 10px/28px Arial,Helvetica,sans-serif',
+        'letter-spacing:0.2px',
+        'color:#e85a5a',
+        'cursor:pointer',
+        'user-select:none',
+        'vertical-align:middle',
+        'white-space:nowrap',
+        'position:relative',
+        'z-index:11',
+        'flex:0 0 auto'
+      ].join(';');
+
+      if (time && time.parentElement) {
+        time.insertAdjacentElement('afterend', badge);
+      } else if (badge.parentElement !== left) {
+        left.appendChild(badge);
+      }
+    },
+
+    hostEl() {
+      return document.querySelector('.html5-video-player')
+        || document.getElementById('movie_player')
+        || document.querySelector('video.html5-main-video')?.parentElement;
+    },
+
+    // Modern YouTube: keep pill inside control bar when those exist
+    injectInControls() {
       const settingsBtn = document.querySelector('.ytp-settings-button');
       const subBtn = document.querySelector('.ytp-subtitles-button');
       const rcLeft = document.querySelector('.ytp-right-controls-left');
@@ -3469,8 +4275,13 @@
 
           const badge = document.createElement('div');
           badge.id = 'ytss-badge';
-          badge.style.cssText = 'font-size: 11px; font-weight: 800; color: #ff334b; background: rgba(0,0,0,0.65); padding: 2px 6px; border-radius: 4px; border: 1px solid #ff334b; white-space: nowrap; line-height: 14px; transition: color 0.2s, border-color 0.2s;';
+          badge.title = 'Click: Stats for nerds';
+          badge.style.cssText = 'font-size: 11px; font-weight: 800; color: #ff334b; background: rgba(0,0,0,0.65); padding: 2px 6px; border-radius: 4px; border: 1px solid #ff334b; white-space: nowrap; line-height: 14px; transition: color 0.2s, border-color 0.2s; cursor: pointer;';
           badge.textContent = '251';
+          badge.addEventListener('click', (e) => {
+            e.stopPropagation();
+            InPlayerSettingsUI.toggle();
+          });
           container.appendChild(badge);
         }
 
@@ -3482,30 +4293,32 @@
           rightControls.insertBefore(container, rightControls.firstChild);
         }
       }
+    },
 
-      this.update();
+    paint(el, isHq, itag) {
+      if (!el) return;
+      if (isHq) {
+        el.textContent = itag === 141 ? '★ 141' : '★ 774';
+        const c = itag === 141 ? '#5ec8d8' : '#e85a5a';
+        el.style.color = c;
+        el.style.borderColor = itag === 141 ? 'rgba(94,200,216,0.55)' : 'rgba(225,29,29,0.55)';
+        el.title = itag === 141
+          ? 'Studio Master AAC 141 (256kbps Full Fidelity)'
+          : 'HQ Opus 774 (256k+ Full Frequency Spectrum)';
+      } else {
+        el.textContent = '251';
+        el.style.color = '#8a8a8a';
+        el.style.borderColor = 'rgba(255,255,255,0.18)';
+        el.title = 'Native Audio (ITAG 251)';
+      }
     },
 
     update() {
-      const badge = document.getElementById('ytss-badge');
-      if (!badge) return;
-
       const itag = Number(status.activeAudioItag);
       const isHq = (itag === 774 || itag === 141) && !status.fallbackReason;
 
-      if (isHq) {
-        badge.textContent = itag === 141 ? '★ 141' : '★ 774';
-        badge.style.color = itag === 141 ? '#00e5ff' : '#ff334b';
-        badge.style.borderColor = itag === 141 ? '#00e5ff' : '#ff334b';
-        badge.title = itag === 141
-          ? 'Studio Master AAC 141 (256kbps Full Fidelity) - Native Player'
-          : 'HQ Opus 774 (256k+ Full Frequency Spectrum) - Native Player';
-      } else {
-        badge.textContent = '251';
-        badge.style.color = '#aaa';
-        badge.style.borderColor = '#555';
-        badge.title = 'Native Audio (ITAG 251)';
-      }
+      this.paint(document.getElementById('ytss-badge'), isHq, itag);
+      this.paint(document.getElementById('ytss-badge-bar'), isHq, itag);
 
       // Miniplayer HUD badge support
       const miniBar = document.querySelector('.ytdMiniplayerInfoBarContent') || document.querySelector('ytd-miniplayer-info-bar');
@@ -3537,8 +4350,22 @@
   // Initialize Engines & UI Hooks
   StudioEngine774.init();
   StatsForNerdsSpoofer.init();
+  InPlayerSettingsUI.init();
   PlayerBadgeUI.inject();
   window.__ytssUpdateBadge = () => PlayerBadgeUI.update();
+  window.__ytssToggleSfn = (force) => StatsForNerdsSpoofer.openNativeOrClassic(force);
+
+  // V3 / classic player: right-click → "Stats for nerds" opens our 2014 panel
+  document.addEventListener('contextmenu', (e) => {
+    const host = StatsForNerdsSpoofer.hostEl();
+    if (!host || !host.contains(e.target)) return;
+    // If the browser shows the native menu, still allow keyboard/click path.
+    // Also open classic panel on shift+right-click (no custom menu API in MAIN world).
+    if (e.shiftKey) {
+      e.preventDefault();
+      StatsForNerdsSpoofer.toggle();
+    }
+  }, true);
 
   ['DOMContentLoaded', 'yt-navigate-finish', 'yt-page-data-updated'].forEach(evt => {
     document.addEventListener(evt, () => {
@@ -4048,6 +4875,7 @@
     getEngine: () => StudioEngine774,
     getBadge: () => PlayerBadgeUI,
     updateBadge: () => PlayerBadgeUI.update(),
+    toggleSfn: (force) => StatsForNerdsSpoofer.toggle(force),
     getHardwareAudioState: () => {
       const v = getMainVideoElement();
       return {

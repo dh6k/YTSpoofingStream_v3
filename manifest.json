@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "YTSpoofingStream",
-  "version": "0.1.6",
-  "description": "Force 100% genuine Studio Opus 774 on YouTube via Dual-Stream Synchronization Engine (YTM Harvester / TV Living Room)",
+  "name": "ytspoofingstream (vorapis edition)",
+  "version": "0.2.1",
+  "description": "Force Studio Opus 774 on YouTube. Runs alongside Project VORAPIS v3 (userscript).",
+  "update_url": "https://raw.githubusercontent.com/dh6k/YTSpoofingStream_v3/main/update/updates.xml",
   "icons": {
     "16": "icon16.png",
     "48": "icon48.png",
