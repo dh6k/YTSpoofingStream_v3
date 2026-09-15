@@ -1,24 +1,26 @@
 <div align="center">
   <img src="logo.svg" alt="YTSpoofingStream Logo" width="128" height="128">
-  <h1>YTSpoofingStream</h1>
+  <h1>YTSpoofingStream <sup>vorapis edition</sup></h1>
   <p><b>Force 100% Genuine Studio Opus 774 Audio on YouTube via Dual-Stream Synchronization Engine</b></p>
+  <p><sub>Fork of <a href="https://github.com/alithw/YTSpoofingStream">alithw/YTSpoofingStream</a> — modified to run alongside <a href="https://github.com/VORAPIS/V3">Project VORAPIS v3</a></sub></p>
 
   <p>
-    <a href="https://github.com/alithw/YTSpoofingStream/releases"><img src="https://img.shields.io/badge/release-v0.1.6-blue.svg?style=flat-square" alt="Latest Release"></a>
+    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.2-blue.svg?style=flat-square" alt="Latest Release"></a>
     <img src="https://img.shields.io/badge/manifest-v3-green.svg?style=flat-square" alt="Manifest V3">
+    <img src="https://img.shields.io/badge/fork-vorapis%20edition-orange.svg?style=flat-square" alt="Vorapis Edition Fork">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=flat-square" alt="License Apache 2.0">
     <img src="https://img.shields.io/badge/platform-Chrome%20%7C%20Edge%20%7C%20Brave-lightgrey?style=flat-square" alt="Platforms">
     <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square" alt="PRs Welcome"></a>
     <a href="CODE_OF_CONDUCT.md"><img src="https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg?style=flat-square" alt="Code of Conduct"></a>
     <a href="SECURITY.md"><img src="https://img.shields.io/badge/security-policy-blueviolet.svg?style=flat-square" alt="Security Policy"></a>
-    <a href="https://github.com/sponsors/alithw"><img src="https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa?style=flat-square&logo=githubsponsors&logoColor=white" alt="GitHub Sponsors"></a>
-    <a href="https://ko-fi.com/alithw"><img src="https://img.shields.io/badge/Ko--fi-Buy%20me%20a%20coffee-ff5e5b?style=flat-square&logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
   </p>
 </div>
 
 > [!IMPORTANT]
-> **RECOMMENDED: UPDATE TO [v0.1.6](https://github.com/alithw/YTSpoofingStream/releases/tag/v0.1.6)**  
-> **v0.1.6** is now the official production-grade stable release. Please see the [**Release Notes**](https://github.com/alithw/YTSpoofingStream/releases/tag/v0.1.6) for full changelog and details.
+> **This is a fork, not the upstream project.**
+> Upstream: [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream) (latest upstream stable: v0.1.6).
+> This fork (**vorapis edition**, current: **v0.2.2**) adapts the YTSS engine to coexist with Project VORAPIS v3 and ships its own CRX packaging / auto-update feed.
+> Report issues and download releases from **this repository** (`dh6k/YTSpoofingStream_v3`), not upstream.
 
 > [!WARNING]
 > **Requirement: Active YouTube Premium Subscription**
@@ -31,7 +33,7 @@
 > 2. Ensure you sign in with the Google account that has active YouTube Premium.
 > 3. Once authenticated, the extension operates with maximum stream availability!
 
-<sub>**Note on Firefox**: Support for Mozilla Firefox has been discontinued due to Gecko engine constraints (see [commit 63ff08d](https://github.com/alithw/YTSpoofingStream/commit/63ff08dc622278be8c58eb7db5513c1cb170b100)). Please use Chromium-based browsers.</sub>
+<sub>**Note on Firefox**: Firefox support is not maintained in this fork. Upstream discontinued Gecko support due to engine constraints (see [upstream commit 63ff08d](https://github.com/alithw/YTSpoofingStream/commit/63ff08dc622278be8c58eb7db5513c1cb170b100)). Use Chromium-based browsers.</sub>
 
 *Read this in other languages: [Tiếng Việt](README-vi.md).*
 
@@ -48,6 +50,7 @@
   - [5. Master Clock Audio Synchronization](#5-master-clock-audio-synchronization)
 - [🎛️ Operation Modes](#️-operation-modes)
 - [📊 Full-Track FFT Spectrum Benchmark Results](#-full-track-fft-spectrum-benchmark-results)
+- [🍴 Vorapis edition (this fork)](#-vorapis-edition-this-fork)
 - [🚀 Installation](#-installation)
 - [⚙️ Configuration & Controls](#️-configuration--controls)
 - [🐞 Troubleshooting & FAQ](#-troubleshooting--faq)
@@ -191,26 +194,16 @@ CI: push tag `v0.2.2` (or run **Package CRX** workflow). Store `key.pem` as repo
 ## 🚀 Installation
 
 ### Chromium Browsers (Google Chrome, Brave, Edge, Opera)
-1. Clone or download the repository (`main` branch):
+1. Clone or download **this fork** (`main` branch):
    ```bash
-   git clone https://github.com/alithw/YTSpoofingStream.git
+   git clone https://github.com/dh6k/YTSpoofingStream_v3.git
    ```
 2. Open `chrome://extensions/` and toggle on **Developer mode** in the top-right corner.
-3. Click **Load unpacked** and select the `YTSpoofingStream` folder.
+3. Click **Load unpacked** and select the `YTSpoofingStream_v3` folder.
 4. Open YouTube, ensure you are logged into your Premium account, and verify the `★ 774` badge in the player control bar!
 
-### Mozilla Firefox / Firefox ESR (v128+)
-You can install the officially signed package permanently, or run from source:
-
-- **Quick Install (Signed Package)**:
-  Download the signed [**`YTSS-firefox-0.1.5.1.xpi`**](https://github.com/alithw/YTSpoofingStream/releases/latest/download/YTSS-firefox-0.1.5.1.xpi) package from [GitHub Releases](https://github.com/alithw/YTSpoofingStream/releases) (or direct from the [`firefox`](https://github.com/alithw/YTSpoofingStream/raw/firefox/YTSS-firefox-0.1.5.1.xpi) branch), drag and drop it into Firefox (or open it via `Ctrl+O`), and click **Add** to install it permanently.
-- **Run from Source (Temporary Add-on)**:
-  1. Switch to the `firefox` branch:
-     ```bash
-     git checkout firefox
-     ```
-  2. Open Firefox and navigate to `about:debugging#/runtime/this-firefox`.
-  3. Click **Load Temporary Add-on...** and select `manifest.json`.
+> [!NOTE]
+> This fork does **not** ship Firefox packages. For Firefox, see [upstream releases](https://github.com/alithw/YTSpoofingStream/releases).
 
 ---
 
@@ -239,7 +232,7 @@ A: **Yes, you must turn off this extension when using YouTube Music (`music.yout
 
 ## 💖 Support / Sponsor the Project
 
-If **YTSpoofingStream** enhances your music listening experience on YouTube, consider supporting its active development and maintenance:
+This fork is maintained independently. If it improves your listening experience, consider supporting the **original author** who built the core engine:
 
 <p align="center">
   <a href="https://github.com/sponsors/alithw" target="_blank">
@@ -251,24 +244,25 @@ If **YTSpoofingStream** enhances your music listening experience on YouTube, con
   </a>
 </p>
 
-You can sponsor directly via **[GitHub Sponsors (github.com/sponsors/alithw)](https://github.com/sponsors/alithw)** or buy a coffee on **[Ko-fi (ko-fi.com/alithw)](https://ko-fi.com/alithw)**. Every contribution helps maintain and update the engine against YouTube's frequent backend changes! ☕✨
+You can sponsor the upstream author via **[GitHub Sponsors (github.com/sponsors/alithw)](https://github.com/sponsors/alithw)** or **[Ko-fi (ko-fi.com/alithw)](https://ko-fi.com/alithw)**.
 
 ---
 
 ## 🤝 Contributing & Community
 
-Contributions of all kinds are welcome! Whether you are reporting a bug, proposing new stream extraction strategies, or submitting code improvements, please read our community guidelines:
+Contributions are welcome **to this fork**. For upstream engine questions, prefer the [original repository](https://github.com/alithw/YTSpoofingStream).
 
 - 📘 **[Contributing Guide (CONTRIBUTING.md)](CONTRIBUTING.md)**: Local development setup, codebase architecture map, vanilla ES6+ coding standards, and PR submission checklist.
 - 📜 **[Code of Conduct (CODE_OF_CONDUCT.md)](CODE_OF_CONDUCT.md)**: Our standards for a welcoming, constructive, and harassment-free community (Contributor Covenant 2.1).
 - 🔒 **[Security Policy (SECURITY.md)](SECURITY.md)**: Guidelines for responsibly disclosing vulnerabilities.
-- 🐛 **[Report a Bug](https://github.com/alithw/YTSpoofingStream/issues/new?template=bug_report.yml)**: Use our structured issue form with video details and player console logs.
-- 💡 **[Request a Feature](https://github.com/alithw/YTSpoofingStream/issues/new?template=feature_request.yml)**: Share ideas to enhance audio streaming and client compatibility.
+- 🐛 **[Report a Bug](https://github.com/dh6k/YTSpoofingStream_v3/issues/new?template=bug_report.yml)**: Use our structured issue form with video details and player console logs.
+- 💡 **[Request a Feature](https://github.com/dh6k/YTSpoofingStream_v3/issues/new?template=feature_request.yml)**: Share ideas to enhance audio streaming and client compatibility.
 
 ---
 
 ## ⚠️ Disclaimer
 
+- **Fork Notice**: This repository is an independent fork of [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream). The upstream author is not responsible for changes made in this fork.
 - **Independent Project**: YTSpoofingStream is an independent, open-source project and is **not** affiliated, associated, authorized, endorsed by, or in any way officially connected with YouTube, Google LLC, or Alphabet Inc. The official YouTube website can be found at [https://www.youtube.com](https://www.youtube.com). "YouTube" and "YouTube Music" are registered trademarks of Google LLC.
 - **No DRM Circumvention**: This extension does **not** bypass Widevine DRM, crack protected content, or provide unauthorized downloads/piracy. It strictly functions within legitimate, authenticated browser sessions to route streams already authorized for the user.
 - **Educational & Personal Use**: This software is provided for educational and personal research purposes only. Use of this software is at your own discretion and responsibility in compliance with YouTube's Terms of Service. The software is provided "as is", without warranty of any kind.

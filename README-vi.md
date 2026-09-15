@@ -1,24 +1,26 @@
 <div align="center">
   <img src="logo.svg" alt="YTSpoofingStream Logo" width="128" height="128">
-  <h1>YTSpoofingStream</h1>
+  <h1>YTSpoofingStream <sup>vorapis edition</sup></h1>
   <p><b>Kích Hoạt 100% Luồng Âm Thanh Studio Opus 774 Chuẩn Phòng Thu Trên Trình Duyệt YouTube</b></p>
+  <p><sub>Fork của <a href="https://github.com/alithw/YTSpoofingStream">alithw/YTSpoofingStream</a> — chỉnh sửa để chạy song song với <a href="https://github.com/VORAPIS/V3">Project VORAPIS v3</a></sub></p>
 
   <p>
-    <a href="https://github.com/alithw/YTSpoofingStream/releases"><img src="https://img.shields.io/badge/release-v0.1.6-blue.svg?style=flat-square" alt="Phiên bản Mới nhất"></a>
+    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.2-blue.svg?style=flat-square" alt="Phiên bản Mới nhất"></a>
     <img src="https://img.shields.io/badge/manifest-v3-green.svg?style=flat-square" alt="Manifest V3">
+    <img src="https://img.shields.io/badge/fork-vorapis%20edition-orange.svg?style=flat-square" alt="Vorapis Edition Fork">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=flat-square" alt="Giấy phép Apache 2.0">
     <img src="https://img.shields.io/badge/platform-Chrome%20%7C%20Edge%20%7C%20Brave-lightgrey?style=flat-square" alt="Nền tảng hỗ trợ">
     <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square" alt="Đóng góp vào dự án"></a>
     <a href="CODE_OF_CONDUCT.md"><img src="https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg?style=flat-square" alt="Quy tắc ứng xử"></a>
     <a href="SECURITY.md"><img src="https://img.shields.io/badge/security-policy-blueviolet.svg?style=flat-square" alt="Chính sách bảo mật"></a>
-    <a href="https://github.com/sponsors/alithw"><img src="https://img.shields.io/badge/T%C3%A0i%20tr%E1%BB%A3-GitHub%20Sponsors-ea4aaa?style=flat-square&logo=githubsponsors&logoColor=white" alt="GitHub Sponsors"></a>
-    <a href="https://ko-fi.com/alithw"><img src="https://img.shields.io/badge/Ko--fi-Buy%20me%20a%20coffee-ff5e5b?style=flat-square&logo=ko-fi&logoColor=white" alt="Ko-fi"></a>
   </p>
 </div>
 
 > [!IMPORTANT]
-> **KHUYẾN NGHỊ: CẬP NHẬT LÊN PHIÊN BẢN [v0.1.6](https://github.com/alithw/YTSpoofingStream/releases/tag/v0.1.6)**  
-> **v0.1.6** hiện là phiên bản ổn định chính thức. Vui lòng xem [**Ghi chú Phát hành (Release Notes)**](https://github.com/alithw/YTSpoofingStream/releases/tag/v0.1.6) để xem chi tiết danh sách thay đổi và sửa lỗi.
+> **Đây là fork, không phải dự án gốc.**
+> Dự án gốc: [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream) (phiên bản ổn định gốc: v0.1.6).
+> Fork này (**vorapis edition**, hiện tại: **v0.2.2**) điều chỉnh engine YTSS để chạy song song với Project VORAPIS v3, kèm đóng gói CRX và feed tự cập nhật riêng.
+> Báo lỗi và tải release từ **repository này** (`dh6k/YTSpoofingStream_v3`), không phải repo gốc.
 
 > [!WARNING]
 > **Yêu cầu: Tài khoản YouTube Premium đang hoạt động**
@@ -31,7 +33,7 @@
 > 2. Đảm bảo đăng nhập đúng tài khoản Google có YouTube Premium.
 > 3. Sau khi xác thực thành công, extension sẽ hoạt động với độ khả dụng luồng 774 cao nhất!
 
-<sub>**Lưu ý về Firefox**: Phiên bản Mozilla Firefox đã ngừng hỗ trợ do các giới hạn kỹ thuật của Gecko (xem chi tiết thông báo tại [commit 63ff08d](https://github.com/alithw/YTSpoofingStream/commit/63ff08dc622278be8c58eb7db5513c1cb170b100)). Vui lòng sử dụng các trình duyệt nhân Chromium.</sub>
+<sub>**Lưu ý về Firefox**: Fork này không duy trì hỗ trợ Firefox. Dự án gốc đã ngừng hỗ trợ do giới hạn kỹ thuật của Gecko (xem [commit gốc 63ff08d](https://github.com/alithw/YTSpoofingStream/commit/63ff08dc622278be8c58eb7db5513c1cb170b100)). Vui lòng sử dụng trình duyệt nhân Chromium.</sub>
 
 *Đọc bằng ngôn ngữ khác: [English](README.md).*
 
@@ -48,6 +50,7 @@
   - [5. Đồng bộ Chuẩn Master Clock Âm thanh Nguyên bản 1.0x](#5-đồng-bộ-chuẩn-master-clock-âm-thanh-nguyên-bản-10x)
 - [🎛️ 3 Chế độ Hoạt động](#️-3-chế-độ-hoạt-động)
 - [📊 Kết quả Đo lường Phổ âm Toàn bài hát (FFT Spectrum)](#-kết-quả-đo-lường-phổ-âm-toàn-bài-hát-fft-spectrum)
+- [🍴 Phiên bản Vorapis (bản fork này)](#phiên-bản-vorapis-bản-fork-này)
 - [🚀 Hướng dẫn Cài đặt](#-hướng-dẫn-cài-đặt)
 - [⚙️ Cấu hình & Điều khiển](#️-cấu-hình--điều-khiển)
 - [🐞 Xử lý Sự cố & Câu hỏi Thường gặp](#-xử-lý-sự-cố--câu-hỏi-thường-gặp)
@@ -164,30 +167,44 @@ Kết quả kiểm thử thực tế thời gian thực 100% thời lượng tr�
 
 ---
 
+## Phiên bản Vorapis (bản fork này)
+
+Tên extension: **ytspoofingstream (vorapis edition)** — chỉ gồm engine YTSS. **Không** nhúng V3.
+
+Chạy Project VORAPIS v3 qua userscript manager (Tampermonkey). Không tiêm thêm `vorapis.js` từ extension này nếu không sẽ bị *"multiple instances of V3"*.
+
+- YTSS: `inject.js` (MAIN) + `bridge.js` (ISOLATED) trên `youtube.com`
+- V3 giữ giao diện player 2014 (`#movie_player`, `.ytp-*`), badge `★ 774` vẫn gắn được
+- Cả hai đều hook `window.fetch`; mỗi bên wrap cái trước — thứ tự: userscript trước (document-start) rồi content script, chuỗi giữ nguyên
+
+### Đóng gói CRX + tự cập nhật
+
+```powershell
+# local (Chrome/Edge/Helium)
+.\tools\pack.ps1
+# output: dist-out/ytspoofingstream-vorapis-<ver>.crx  +  key.pem (giữ bí mật)
+```
+
+CI: push tag `v0.2.2` (hoặc chạy workflow **Package CRX**). Lưu `key.pem` dưới secret `CRX_PEM_BASE64` để các bản sau giữ nguyên extension ID.
+
+`manifest.json` có `update_url` → `https://raw.githubusercontent.com/dh6k/YTSpoofingStream_v3/main/update/updates.xml`. Cài `.crx` đã đóng gói (Developer mode), rồi **chrome://extensions → Update** để kéo feed từ Releases của fork này. Bản unpacked bỏ qua `update_url`.
+
+---
+
 ## 🚀 Hướng dẫn Cài đặt
  
 ### Trình duyệt Chromium (Google Chrome, Brave, Edge, Cốc Cốc, Opera)
-1. Tải mã nguồn về máy tính (nhánh `main`):
+1. Tải mã nguồn của **bản fork này** (nhánh `main`):
    ```bash
-   git clone https://github.com/alithw/YTSpoofingStream.git
+   git clone https://github.com/dh6k/YTSpoofingStream_v3.git
    ```
 2. Mở trình duyệt Chrome và truy cập `chrome://extensions/`.
 3. Bật **Chế độ dành cho nhà phát triển (Developer mode)** ở góc trên bên phải.
-4. Nhấn nút **Tải tiện ích đã giải nén (Load unpacked)** và chọn thư mục `YTSpoofingStream`.
+4. Nhấn nút **Tải tiện ích đã giải nén (Load unpacked)** và chọn thư mục `YTSpoofingStream_v3`.
 5. Mở YouTube, đảm bảo đã đăng nhập tài khoản có Premium, và thưởng thức âm thanh chuẩn phòng thu với huy hiệu `★ 774` trên trình phát!
 
-### Trình duyệt Mozilla Firefox / Firefox ESR (v128+)
-Bạn có thể cài đặt vĩnh viễn bằng gói đã ký số chính thức hoặc nạp từ mã nguồn:
-
-- **Cài đặt nhanh (Gói XPI đã ký số chính thức bởi Mozilla)**:
-  Tải file cài đặt [**`YTSS-firefox-0.1.5.1.xpi`**](https://github.com/alithw/YTSpoofingStream/releases/latest/download/YTSS-firefox-0.1.5.1.xpi) từ mục [GitHub Releases](https://github.com/alithw/YTSpoofingStream/releases) (hoặc trực tiếp từ nhánh [`firefox`](https://github.com/alithw/YTSpoofingStream/raw/firefox/YTSS-firefox-0.1.5.1.xpi)), kéo thả trực tiếp vào cửa sổ Firefox (hoặc nhấn `Ctrl + O` để mở file), sau đó bấm **Thêm (Add)** để cài đặt vĩnh viễn (không bao giờ bị mất khi khởi động lại).
-- **Chạy từ mã nguồn (Tiện ích tạm thời)**:
-  1. Chuyển sang nhánh `firefox`:
-     ```bash
-     git checkout firefox
-     ```
-  2. Mở Firefox và truy cập `about:debugging#/runtime/this-firefox`.
-  3. Bấm **Tải tiện ích tạm thời (Load Temporary Add-on...)** và chọn file `manifest.json`.
+> [!NOTE]
+> Fork này **không** đóng gói Firefox. Xem [releases của dự án gốc](https://github.com/alithw/YTSpoofingStream/releases) nếu cần Firefox.
 
 ---
 
@@ -216,7 +233,7 @@ Bạn có thể cài đặt vĩnh viễn bằng gói đã ký số chính thức
 
 ## 💖 Ủng Hộ & Tài Trợ Dự Án
 
-Nếu **YTSpoofingStream** mang lại trải nghiệm nghe nhạc tuyệt vời hơn cho bạn trên YouTube, bạn có thể ủng hộ và đồng hành cùng tác giả để tiếp thêm động lực nghiên cứu và duy trì tiện ích:
+Fork này được duy trì độc lập. Nếu tiện ích cải thiện trải nghiệm nghe nhạc của bạn, hãy cân nhắc ủng hộ **tác giả gốc** — người xây dựng engine chính:
 
 <p align="center">
   <a href="https://github.com/sponsors/alithw" target="_blank">
@@ -228,24 +245,25 @@ Nếu **YTSpoofingStream** mang lại trải nghiệm nghe nhạc tuyệt vời 
   </a>
 </p>
 
-Bạn có thể tài trợ trực tiếp qua **[GitHub Sponsors (github.com/sponsors/alithw)](https://github.com/sponsors/alithw)** hoặc mời một ly cà phê qua **[Ko-fi (ko-fi.com/alithw)](https://ko-fi.com/alithw)**. Mọi sự ủng hộ và đồng hành của bạn đều là nguồn động lực rất lớn! ☕✨
+Bạn có thể tài trợ tác giả gốc qua **[GitHub Sponsors (github.com/sponsors/alithw)](https://github.com/sponsors/alithw)** hoặc **[Ko-fi (ko-fi.com/alithw)](https://ko-fi.com/alithw)**.
 
 ---
 
 ## 🤝 Đóng góp & Cộng đồng (Contributing)
 
-Dự án luôn hoan nghênh mọi sự đóng góp từ cộng đồng! Dù bạn muốn báo lỗi, đóng góp ý tưởng khai thác luồng hay tối ưu hóa mã nguồn, vui lòng tham khảo các tài liệu chỉ dẫn:
+Đóng góp được hoan nghênh **tại fork này**. Về câu hỏi engine gốc, ưu tiên [repository gốc](https://github.com/alithw/YTSpoofingStream).
 
 - 📘 **[Cẩm nang Đóng góp (CONTRIBUTING.md)](CONTRIBUTING.md)**: Hướng dẫn cài đặt môi trường lập trình, cấu trúc thư mục dự án, tiêu chuẩn code vanilla ES6+ và checklist kiểm tra trước khi gửi PR.
 - 📜 **[Quy tắc Ứng xử (CODE_OF_CONDUCT.md)](CODE_OF_CONDUCT.md)**: Tiêu chuẩn ứng xử văn minh, tôn trọng và hỗ trợ lẫn nhau trong cộng đồng theo chuẩn Contributor Covenant 2.1.
 - 🔒 **[Chính sách Bảo mật (SECURITY.md)](SECURITY.md)**: Quy trình báo cáo lỗ hổng bảo mật có trách nhiệm.
-- 🐛 **[Báo cáo Sự cố (Bug Report)](https://github.com/alithw/YTSpoofingStream/issues/new?template=bug_report.yml)**: Mẫu báo cáo lỗi chi tiết kèm URL video và log console.
-- 💡 **[Đề xuất Tính năng (Feature Request)](https://github.com/alithw/YTSpoofingStream/issues/new?template=feature_request.yml)**: Nơi chia sẻ ý tưởng cải tiến thuật toán và chất lượng âm thanh.
+- 🐛 **[Báo cáo Sự cố (Bug Report)](https://github.com/dh6k/YTSpoofingStream_v3/issues/new?template=bug_report.yml)**: Mẫu báo cáo lỗi chi tiết kèm URL video và log console.
+- 💡 **[Đề xuất Tính năng (Feature Request)](https://github.com/dh6k/YTSpoofingStream_v3/issues/new?template=feature_request.yml)**: Nơi chia sẻ ý tưởng cải tiến thuật toán và chất lượng âm thanh.
 
 ---
 
 ## ⚠️ Tuyên bố Từ chối Trách nhiệm (Disclaimer)
 
+- **Thông báo Fork**: Repository này là fork độc lập của [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream). Tác giả gốc không chịu trách nhiệm về các thay đổi trong fork này.
 - **Dự án Độc lập**: YTSpoofingStream là một dự án mã nguồn mở độc lập và **không** có bất kỳ liên kết, ủy quyền, chứng thực hay liên hệ chính thức nào với YouTube, Google LLC hay Alphabet Inc. Trang web chính thức của YouTube tại [https://www.youtube.com](https://www.youtube.com). "YouTube" và "YouTube Music" là các nhãn hiệu đã được đăng ký của Google LLC.
 - **Không Phá khóa DRM**: Tiện ích mở rộng này **hoàn toàn không** bẻ khóa DRM Widevine, không can thiệp nội dung bản quyền được mã hóa và không hỗ trợ tải lậu video/nhạc. Tiện ích chỉ hoạt động trong phạm vi phiên duyệt web hợp lệ của người dùng nhằm định tuyến các luồng phát đã được cấp phép.
 - **Mục đích Nghiên cứu & Cá nhân**: Phần mềm được phát triển phục vụ mục đích nghiên cứu học thuật và trải nghiệm cá nhân. Người dùng tự chịu trách nhiệm khi sử dụng tiện ích theo Điều khoản Dịch vụ của YouTube. Phần mềm được cung cấp dưới dạng "nguyên trạng" (as-is) và không đi kèm bất kỳ cam kết hay bảo đảm nào.
