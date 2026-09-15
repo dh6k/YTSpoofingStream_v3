@@ -182,7 +182,7 @@ Run Project VORAPIS v3 via your userscript manager (Tampermonkey). Do not also i
 # output: dist-out/ytspoofingstream-vorapis-<ver>.crx  +  key.pem (keep secret)
 ```
 
-CI: push tag `v0.2.1` (or run **Package CRX** workflow). Store `key.pem` as repo secret `CRX_PEM_BASE64` so later builds keep the same extension ID.
+CI: push tag `v0.2.2` (or run **Package CRX** workflow). Store `key.pem` as repo secret `CRX_PEM_BASE64` so later builds keep the same extension ID.
 
 `manifest.json` has `update_url` → `https://raw.githubusercontent.com/dh6k/YTSpoofingStream_v3/main/update/updates.xml`. Install the packed `.crx` (Developer mode), then **chrome://extensions → Update** pulls the feed from this fork's Releases. Unpacked installs ignore `update_url`.
 
