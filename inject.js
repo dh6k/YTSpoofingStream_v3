@@ -2205,7 +2205,11 @@
         report();
         if (typeof PlayerBadgeUI !== 'undefined') PlayerBadgeUI.update();
       }
-      if (reason) console.log(TAG, `[StudioEngine774] Fallback to native. Reason: ${reason}`);
+      if (reason === 'Native TV 774 stream') {
+        console.log(TAG, '[StudioEngine774] Using native TV 774 (SABR/disguise) — dual engine off');
+      } else if (reason) {
+        console.log(TAG, `[StudioEngine774] Fallback to native. Reason: ${reason}`);
+      }
     }
   };
 
@@ -4651,7 +4655,12 @@
             report();
           }
         } else {
-          console.log(TAG, `[XHRCapture] Unmatched videoplayback: reqItags=${reqItags}, activeItag=${activeItag} | URL:`, url);
+          // Video-only itags (e.g. 399) legitimately miss the audio matcher — not a fault.
+          const AUDIO_ITAGS = new Set([139, 140, 141, 171, 249, 250, 251, 256, 258, 325, 328, 774]);
+          const looksAudio = reqItags.some(i => AUDIO_ITAGS.has(i));
+          if (looksAudio) {
+            console.log(TAG, `[XHRCapture] Unmatched audio videoplayback: reqItags=${reqItags}, activeItag=${activeItag}`);
+          }
         }
       } catch (e) {
         console.error(TAG, `[XHRCapture] Error:`, e);
