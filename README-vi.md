@@ -5,7 +5,7 @@
   <p><sub>Fork của <a href="https://github.com/alithw/YTSpoofingStream">alithw/YTSpoofingStream</a> — chỉnh sửa để chạy song song với <a href="https://github.com/VORAPIS/V3">Project VORAPIS v3</a></sub></p>
 
   <p>
-    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.2-blue.svg?style=flat-square" alt="Phiên bản Mới nhất"></a>
+    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.3-blue.svg?style=flat-square" alt="Phiên bản Mới nhất"></a>
     <img src="https://img.shields.io/badge/manifest-v3-green.svg?style=flat-square" alt="Manifest V3">
     <img src="https://img.shields.io/badge/fork-vorapis%20edition-orange.svg?style=flat-square" alt="Vorapis Edition Fork">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=flat-square" alt="Giấy phép Apache 2.0">
@@ -18,8 +18,8 @@
 
 > [!IMPORTANT]
 > **Đây là fork, không phải dự án gốc.**
-> Dự án gốc: [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream) (phiên bản ổn định gốc: v0.1.6).
-> Fork này (**vorapis edition**, hiện tại: **v0.2.2**) điều chỉnh engine YTSS để chạy song song với Project VORAPIS v3, kèm đóng gói CRX và feed tự cập nhật riêng.
+> Dự án gốc: [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream) (phiên bản ổn định gốc: v0.1.7).
+> Fork này (**vorapis edition**, hiện tại: **v0.2.3**) điều chỉnh engine YTSS để chạy song song với Project VORAPIS v3, kèm đóng gói CRX và feed tự cập nhật riêng.
 > Báo lỗi và tải release từ **repository này** (`dh6k/YTSpoofingStream_v3`), không phải repo gốc.
 
 > [!WARNING]
@@ -185,7 +185,7 @@ Chạy Project VORAPIS v3 qua userscript manager (Tampermonkey). Không tiêm th
 # output: dist-out/ytspoofingstream-vorapis-<ver>.crx  +  key.pem (giữ bí mật)
 ```
 
-CI: push tag `v0.2.2` (hoặc chạy workflow **Package CRX**). Lưu `key.pem` dưới secret `CRX_PEM_BASE64` để các bản sau giữ nguyên extension ID.
+CI: push tag `v0.2.3` (hoặc chạy workflow **Package CRX**). Lưu `key.pem` dưới secret `CRX_PEM_BASE64` để các bản sau giữ nguyên extension ID.
 
 `manifest.json` có `update_url` → `https://raw.githubusercontent.com/dh6k/YTSpoofingStream_v3/main/update/updates.xml`. Cài `.crx` đã đóng gói (Developer mode), rồi **chrome://extensions → Update** để kéo feed từ Releases của fork này. Bản unpacked bỏ qua `update_url`.
 
@@ -205,6 +205,21 @@ CI: push tag `v0.2.2` (hoặc chạy workflow **Package CRX**). Lưu `key.pem` d
 
 > [!NOTE]
 > Fork này **không** đóng gói Firefox. Xem [releases của dự án gốc](https://github.com/alithw/YTSpoofingStream/releases) nếu cần Firefox.
+
+---
+
+## 🌐 Đa ngôn ngữ
+
+Popup có sẵn **English** và **Tiếng Việt**, tự nhận diện ngôn ngữ trình duyệt lần đầu. Đổi bất kỳ lúc nào qua dropdown góc phải header; lựa chọn lưu trong `chrome.storage.local`.
+
+### Đóng góp ngôn ngữ
+
+1. Nhân bản [`locales/template.json`](locales/template.json), đổi tên theo mã ISO 639-1 (vd: `ja.json`, `ko.json`, `fr.json`) trong `locales/`.
+2. Dịch các giá trị. Giữ nguyên placeholder (`{version}`, `{method}`, `{label}`, `{error}`, `{url}`) và ký hiệu (★, •, ↻, ⟳).
+3. Thêm `<option value="code">Tên ngôn ngữ</option>` vào `#langSelect` trong `popup.html`.
+4. Gửi PR.
+
+---
 
 ---
 

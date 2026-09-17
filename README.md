@@ -5,7 +5,7 @@
   <p><sub>Fork of <a href="https://github.com/alithw/YTSpoofingStream">alithw/YTSpoofingStream</a> — modified to run alongside <a href="https://github.com/VORAPIS/V3">Project VORAPIS v3</a></sub></p>
 
   <p>
-    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.2-blue.svg?style=flat-square" alt="Latest Release"></a>
+    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.3-blue.svg?style=flat-square" alt="Latest Release"></a>
     <img src="https://img.shields.io/badge/manifest-v3-green.svg?style=flat-square" alt="Manifest V3">
     <img src="https://img.shields.io/badge/fork-vorapis%20edition-orange.svg?style=flat-square" alt="Vorapis Edition Fork">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=flat-square" alt="License Apache 2.0">
@@ -18,8 +18,8 @@
 
 > [!IMPORTANT]
 > **This is a fork, not the upstream project.**
-> Upstream: [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream) (latest upstream stable: v0.1.6).
-> This fork (**vorapis edition**, current: **v0.2.2**) adapts the YTSS engine to coexist with Project VORAPIS v3 and ships its own CRX packaging / auto-update feed.
+> Upstream: [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream) (latest upstream stable: v0.1.7).
+> This fork (**vorapis edition**, current: **v0.2.3**) adapts the YTSS engine to coexist with Project VORAPIS v3 and ships its own CRX packaging / auto-update feed.
 > Report issues and download releases from **this repository** (`dh6k/YTSpoofingStream_v3`), not upstream.
 
 > [!WARNING]
@@ -185,7 +185,7 @@ Run Project VORAPIS v3 via your userscript manager (Tampermonkey). Do not also i
 # output: dist-out/ytspoofingstream-vorapis-<ver>.crx  +  key.pem (keep secret)
 ```
 
-CI: push tag `v0.2.2` (or run **Package CRX** workflow). Store `key.pem` as repo secret `CRX_PEM_BASE64` so later builds keep the same extension ID.
+CI: push tag `v0.2.3` (or run **Package CRX** workflow). Store `key.pem` as repo secret `CRX_PEM_BASE64` so later builds keep the same extension ID.
 
 `manifest.json` has `update_url` → `https://raw.githubusercontent.com/dh6k/YTSpoofingStream_v3/main/update/updates.xml`. Install the packed `.crx` (Developer mode), then **chrome://extensions → Update** pulls the feed from this fork's Releases. Unpacked installs ignore `update_url`.
 
@@ -204,6 +204,21 @@ CI: push tag `v0.2.2` (or run **Package CRX** workflow). Store `key.pem` as repo
 
 > [!NOTE]
 > This fork does **not** ship Firefox packages. For Firefox, see [upstream releases](https://github.com/alithw/YTSpoofingStream/releases).
+
+---
+
+## 🌐 Localization
+
+The popup ships with **English** and **Tiếng Việt** and auto-detects your browser language on first run. Switch anytime via the language dropdown in the popup header; the choice is stored in `chrome.storage.local`.
+
+### Contribute a language
+
+1. Copy [`locales/template.json`](locales/template.json) and rename it to your ISO 639-1 code (e.g. `ja.json`, `ko.json`, `fr.json`) inside `locales/`.
+2. Translate the values. Keep placeholders (`{version}`, `{method}`, `{label}`, `{error}`, `{url}`) and symbols (★, •, ↻, ⟳) intact.
+3. Add `<option value="code">Language Name</option>` to `#langSelect` in `popup.html`.
+4. Open a PR.
+
+---
 
 ---
 
