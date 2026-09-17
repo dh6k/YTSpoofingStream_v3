@@ -43,6 +43,8 @@ jobs:
           cp manifest.json background.js bridge.js inject.js \
              popup.html popup.js harvester.html harvester.js ytm_harvester_cs.js \
              icon16.png icon48.png icon128.png logo.svg dist/
+          mkdir -p dist/locales
+          cp locales/*.json dist/locales/
           node -e "
             const fs=require('fs');
             const m=JSON.parse(fs.readFileSync('dist/manifest.json','utf8'));
