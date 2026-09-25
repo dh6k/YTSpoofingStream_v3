@@ -198,7 +198,7 @@ Chạy Project VORAPIS v3 qua userscript manager (Tampermonkey). Không tiêm th
 # output: dist-out/ytspoofingstream-vorapis-<ver>.crx  +  key.pem (giữ bí mật)
 ```
 
-CI: push tag `v0.2.3` (hoặc chạy workflow **Package CRX**). Lưu `key.pem` dưới secret `CRX_PEM_BASE64` để các bản sau giữ nguyên extension ID.
+CI: push tag `v0.2.4` (hoặc chạy workflow **Package CRX**). Lưu `key.pem` dưới secret `CRX_PEM_BASE64` để các bản sau giữ nguyên extension ID.
 
 `manifest.json` có `update_url` → `https://raw.githubusercontent.com/dh6k/YTSpoofingStream_v3/main/update/updates.xml`. Cài `.crx` đã đóng gói (Developer mode), rồi **chrome://extensions → Update** để kéo feed từ Releases của fork này. Bản unpacked bỏ qua `update_url`.
 
