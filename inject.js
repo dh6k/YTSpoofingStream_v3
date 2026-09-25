@@ -276,6 +276,8 @@
 
   // Single writer for TV-native 774 status. The old copy-pasted blocks updated the
   // badge fields but never touched injectedStreams, so the popup kept showing 0.
+  // Also arms the SABR body rewriter so the player's UMP request asks for real 774.
+  const sabrRewrite = { on: false, lastModified: 0 };
   function noteTvNative774(best774, streamCount) {
     const label = 'TVHTML5 (Native SABR 774)';
     status.activeAudioItag = 774;
@@ -283,6 +285,8 @@
     status.fallbackReason = null;
     status.bestAudioInfo = `ITAG 774 [HQ ★] | Opus ${formatBitrate(best774)} | Method: ${label}`;
     status.injectedStreams = streamCount > 0 ? streamCount : 1;
+    sabrRewrite.on = true;
+    sabrRewrite.lastModified = Number(best774?.lastModified || best774?.last_modified || 0);
     report();
     if (typeof PlayerBadgeUI !== 'undefined') PlayerBadgeUI.update();
   }
@@ -785,15 +789,86 @@
     });
   } catch (e) {}
 
-  // Hardware play interceptor: ensures native video is completely silent whenever playback begins/resumes
+  // Hardware play interceptor. When the user has paused we must NOT let page
+  // scripts (Vorapis/V3 keep calling play/playVideo) resurrect playback.
   const origPlay = HTMLMediaElement.prototype.play;
+  const origPause = HTMLMediaElement.prototype.pause;
+  window.__ytssPauseGesture = { at: 0, wasPaused: true };
+
   HTMLMediaElement.prototype.play = function(...args) {
-    if (typeof StudioEngine774 !== 'undefined' && this !== StudioEngine774.audio && StudioEngine774.isActive && !StudioEngine774.isAdActive()) {
-      try { descVolume.set.call(this, 0); } catch (e) {}
-      try { descMuted.set.call(this, true); } catch (e) {}
+    const eng = (typeof StudioEngine774 !== 'undefined') ? StudioEngine774 : null;
+    if (eng) {
+      const isEngAudio = this === eng.audio;
+      const isMainVid = this !== eng.audio && (
+        this === getMainVideoElement() ||
+        (this.classList && this.classList.contains('html5-main-video')) ||
+        (this.closest && this.closest('#movie_player, .html5-video-player'))
+      );
+      if (eng._userPaused && (isEngAudio || isMainVid)) {
+        // Allow only a fresh trusted "play" gesture (button / space / k).
+        const g = window.__ytssPauseGesture;
+        const gestureOk = g && g.wasPaused && (Date.now() - g.at) < 500;
+        if (!gestureOk) {
+          return Promise.resolve();
+        }
+        if (typeof eng.unlockPlay === 'function') eng.unlockPlay();
+      }
+      if (!eng._userPaused && this !== eng.audio && eng.isActive && !eng.isAdActive()) {
+        try { descVolume.set.call(this, 0); } catch (e) {}
+        try { descMuted.set.call(this, true); } catch (e) {}
+      }
     }
     return origPlay.apply(this, args);
   };
+
+  // Pause interceptor: OS media keys / Chrome media widget often pause only the
+  // audible <audio>. Flag that as a user pause and park the video too so the
+  // watchdog cannot resume audio behind the user's back.
+  HTMLMediaElement.prototype.pause = function(...args) {
+    try {
+      if (typeof StudioEngine774 !== 'undefined' && StudioEngine774.isActive && !StudioEngine774.isAdActive()) {
+        const isEngineAudio = this === StudioEngine774.audio;
+        const isMainVideo = this !== StudioEngine774.audio &&
+          ((this.classList && this.classList.contains('html5-main-video')) ||
+           (this.closest && this.closest('#movie_player, .html5-video-player')));
+        if (isEngineAudio || isMainVideo) {
+          if (typeof StudioEngine774.lockPause === 'function') {
+            StudioEngine774.lockPause();
+          } else {
+            StudioEngine774._userPaused = true;
+          }
+          const other = isEngineAudio ? getMainVideoElement() : StudioEngine774.audio;
+          if (other && !other.paused) {
+            try { origPause.call(other); } catch (e) {}
+          }
+        }
+      }
+    } catch (e) {}
+    return origPause.apply(this, args);
+  };
+
+  // Trusted gesture tracker: distinguish user "play" from V3 auto-resume.
+  document.addEventListener('pointerdown', (e) => {
+    if (!e.isTrusted) return;
+    const v = getMainVideoElement();
+    const inPlayer = e.target && e.target.closest &&
+      e.target.closest('#movie_player, .html5-player-chrome, .ytp-chrome-bottom, .ytp-control-bar, .ytp-pause-overlay, .ytp-large-play-button');
+    if (!inPlayer) return;
+    window.__ytssPauseGesture = {
+      at: Date.now(),
+      wasPaused: !!(v && (v.paused || v.ended)),
+    };
+  }, true);
+  document.addEventListener('keydown', (e) => {
+    if (!e.isTrusted) return;
+    if (e.code === 'Space' || e.code === 'KeyK' || e.code === 'MediaPlayPause' || e.code === 'MediaPlay') {
+      const v = getMainVideoElement();
+      window.__ytssPauseGesture = {
+        at: Date.now(),
+        wasPaused: !!(v && (v.paused || v.ended)),
+      };
+    }
+  }, true);
 
   function cleanStreamUrl(rawUrl) {
     if (!rawUrl || typeof rawUrl !== 'string') return rawUrl;
@@ -952,6 +1027,40 @@
     _hookedVideos: new WeakSet(),
     _userMuted: false,
     _userPaused: false,
+    _pauseLockUntil: 0,
+    _pauseReassert: null,
+    // Sticky pause: keep forcing pause until the user explicitly plays again.
+    // Vorapis/V3 calls play() in loops; a short lock is not enough.
+    lockPause() {
+      this._userPaused = true;
+      this._pauseLockUntil = Date.now() + 60000;
+      const apply = () => {
+        if (!this._userPaused) return;
+        try {
+          if (this.audio && !this.audio.paused) this.audio.pause();
+          const v = getMainVideoElement();
+          if (v && !v.paused && !v.ended) v.pause();
+        } catch (e) {}
+      };
+      apply();
+      if (this._pauseReassert) clearInterval(this._pauseReassert);
+      this._pauseReassert = setInterval(apply, 150);
+    },
+    unlockPlay() {
+      this._userPaused = false;
+      this._pauseLockUntil = 0;
+      if (this._pauseReassert) {
+        clearInterval(this._pauseReassert);
+        this._pauseReassert = null;
+      }
+    },
+    // Engine-internal resume: never yank playback after a user/media-key pause.
+    _tryPlayAudio() {
+      if (this._userPaused || Date.now() < this._pauseLockUntil) return;
+      if (!this.isActive || !this.audio || this.isAdActive()) return;
+      if (!this.audio.paused) return;
+      this.audio.play().catch(() => {});
+    },
     _isAudioBuffering: false,
     _isInternalVideoSync: false,
     _isTabResyncing: false,
@@ -1443,7 +1552,7 @@
               if (Math.abs(this.audio.currentTime - video.currentTime) > 1.0) {
                 this.audio.currentTime = video.currentTime;
               }
-              this.audio.play().catch(() => {});
+              this._tryPlayAudio();
             }
           }
           // Do NOT pause 774 audio when tab is hidden, because Chrome automatically pauses/throttles
@@ -1461,7 +1570,11 @@
         }
 
         if (e.type === 'play' || e.type === 'playing') {
-          this._userPaused = false;
+          if (this._userPaused) {
+            // V3/MSE auto-resume race — keep the user's pause.
+            this.lockPause();
+            return;
+          }
           // Playback Safety Guard: verify audio engine is playing for current active video
           if (this.isActive && this.activeVideoId && !isCurrentWatchVideo(this.activeVideoId)) {
             console.warn(TAG, `[PlaybackSafetyGuard] Audio engine playing ${this.activeVideoId} but video is no longer active! Preparing transition.`);
@@ -1484,27 +1597,27 @@
               this.audio.currentTime = video.currentTime;
             }
             this.audio.playbackRate = video.playbackRate || 1.0;
-            this.audio.play().catch((err) => {
-              if (err && err.name === 'NotAllowedError') {
-                const resume = () => {
-                  if (this.isActive && this.audio && !video.paused && !this.isAdActive()) {
-                    this.audio.play().catch(() => {});
-                  }
-                };
-                window.addEventListener('click', resume, { once: true, capture: true });
-                window.addEventListener('keydown', resume, { once: true, capture: true });
-              }
-            });
+            if (!this._userPaused) {
+              this.audio.play().catch((err) => {
+                if (err && err.name === 'NotAllowedError') {
+                  const resume = () => {
+                    if (this.isActive && this.audio && !video.paused && !this.isAdActive() && !this._userPaused) {
+                      this.audio.play().catch(() => {});
+                    }
+                  };
+                  window.addEventListener('click', resume, { once: true, capture: true });
+                  window.addEventListener('keydown', resume, { once: true, capture: true });
+                }
+              });
+            }
           }
         } else if (e.type === 'pause') {
           if (video.ended) {
             // Video ended naturally; do NOT abruptly kill audio while audio is finishing
             return;
           }
-          if (!document.hidden && !this._isInternalVideoSync) {
-            this._userPaused = true;
-            this.audio.pause();
-          }
+          // User-initiated pause always wins — even mid internal sync.
+          this.lockPause();
         } else if (e.type === 'loadedmetadata' || e.type === 'canplay') {
           if (!this.isAdActive() && !document.hidden && !this._isInternalVideoSync && !this._isVolScrubbing) {
             this._silenceElement(video);
@@ -1512,7 +1625,7 @@
             if (video.paused && !this.audio.paused) {
               this.audio.pause();
             } else if (!video.paused && this.audio.paused) {
-              this.audio.play().catch(() => {});
+              this._tryPlayAudio();
             }
           }
         }
@@ -1572,6 +1685,49 @@
 
         player.addEventListener('onVolumeChange', handleVolumeChange);
 
+        // Sync YouTube player pause/play with the detached 774 <audio>.
+        if (!player._ytssPauseHooked && typeof player.pauseVideo === 'function') {
+          player._ytssPauseHooked = true;
+          const origPauseVideo = player.pauseVideo.bind(player);
+          const origPlayVideo = typeof player.playVideo === 'function' ? player.playVideo.bind(player) : null;
+          player.pauseVideo = (...a) => {
+            this.lockPause();
+            return origPauseVideo(...a);
+          };
+          if (origPlayVideo) {
+            player.playVideo = (...a) => {
+              // Do NOT unlock here — V3 also calls playVideo(). The play()
+              // interceptor only unlocks on a trusted play gesture.
+              return origPlayVideo(...a);
+            };
+          }
+        }
+
+        // OS media keys / Chrome media widget
+        try {
+          if (navigator.mediaSession && typeof navigator.mediaSession.setActionHandler === 'function') {
+            navigator.mediaSession.setActionHandler('pause', () => {
+              this.lockPause();
+              try { player.pauseVideo?.(); } catch (e) {}
+              if (this.audio && !this.audio.paused) {
+                try { this.audio.pause(); } catch (e) {}
+              }
+              const v = getMainVideoElement();
+              if (v && !v.paused) {
+                try { origPause.call(v); } catch (e) {}
+              }
+            });
+            navigator.mediaSession.setActionHandler('play', () => {
+              this.unlockPlay();
+              try { player.playVideo?.(); } catch (e) {}
+              const v = getMainVideoElement();
+              if (v && v.paused) {
+                try { v.play(); } catch (e) {}
+              }
+            });
+          }
+        } catch (e) {}
+
         let isPlaybackEnded = false;
         const handleVideoDataChange = () => {
           const newVid = player.getVideoData?.()?.video_id || (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
@@ -1629,6 +1785,12 @@
 
         player.addEventListener('videodatachange', handleVideoDataChange);
         player.addEventListener('onStateChange', (state) => {
+          if (state === 2) {
+            // YT paused (UI button / space / media session through player)
+            this.lockPause();
+            return;
+          }
+          // state 1/3 can be fired by V3 auto-resume — never unlock here.
           if (state === 0) {
             isPlaybackEnded = true;
           } else if (state === 1 || state === 3) {
@@ -1661,6 +1823,17 @@
         document.addEventListener('click', (e) => {
           const replayBtn = e.target?.closest?.('.ytp-play-button, .ytp-replay-button');
           if (replayBtn) {
+            // Pause intent must stick even if a later canplay tries to resume 774 audio.
+            try {
+              const st = typeof player.getPlayerState === 'function' ? player.getPlayerState() : null;
+              const mainV = getMainVideoElement();
+              const wasPlaying = st === 1 || st === 3 || (mainV && !mainV.paused && !mainV.ended);
+              if (wasPlaying) {
+                this.lockPause();
+              } else {
+                this.unlockPlay();
+              }
+            } catch (err) {}
             const state = (typeof player.getPlayerState === 'function') ? player.getPlayerState() : null;
             if (state === 0 || isPlaybackEnded) {
               const curVid = player.getVideoData?.()?.video_id || (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
@@ -1742,6 +1915,9 @@
 
     prepareTransition(newVid) {
       console.log(TAG, `[StudioEngine774] Preparing transition to: ${newVid}`);
+      // New video = new playback context. A pause lock from the previous track
+      // must not block play() on this one.
+      this.unlockPlay();
       this._isTransitioning = true;
       this.isActive = false;
       this.activeVideoId = null;
@@ -2001,7 +2177,7 @@
         this.audio.playbackRate = video.playbackRate;
         this.syncVol(video);
         if (!video.paused && !this.isAdActive()) {
-          this.audio.play().catch(() => {});
+          this._tryPlayAudio();
         }
       }
     },
@@ -2129,7 +2305,7 @@
           if (stalledDuration > 15000) {
             this._reconnectStream('Watchdog detected frozen stream');
           } else {
-            this.audio.play().catch(() => {});
+            this._tryPlayAudio();
           }
           return;
         }
@@ -2138,9 +2314,12 @@
         this._lastAudioAdvance = Date.now();
       }
 
-      // 2. Audio paused while video is playing
-      if (this.audio.paused && !video.paused && !this._isAudioBuffering) {
-        this.audio.play().catch(() => {});
+      // 2. Audio paused while video is playing.
+      // NEVER auto-resume if the user (or OS media keys / browser media widget) paused.
+      // Media Session pause often hits only the audible <audio> element; without
+      // _userPaused the watchdog used to play() it back and pause felt broken.
+      if (this.audio.paused && !video.paused && !this._isAudioBuffering && !this._userPaused) {
+        this._tryPlayAudio();
       }
 
       // 3. Keep playbackRate strictly 1:1 with video at all times.
@@ -2184,7 +2363,11 @@
       this._reconnectAttempts = 0;
       this._isAudioBuffering = false;
       this._isSeeking = false;
-      this._userPaused = false;
+      // Keep an existing user pause. applyToVideo can run from canplay/tryUpgrade
+      // after the user already paused — clearing this then play() un-paused audio.
+      if (mainVideo && !mainVideo.paused) {
+        this._userPaused = false;
+      }
       this._hasDispatchedEnded = false;
       this._lastSeekTime = Date.now();
       this.updateNormalizedGain();
@@ -2210,11 +2393,11 @@
       this.syncVol(mainVideo);
 
       const isPlayerPlaying = !mainVideo.paused || (document.hidden && document.getElementById('movie_player')?.getPlayerState?.() === 1);
-      if (isPlayerPlaying && !this.isAdActive()) {
+      if (isPlayerPlaying && !this.isAdActive() && !this._userPaused) {
         this.audio.play().catch((err) => {
           if (err && err.name === 'NotAllowedError') {
             const resume = () => {
-              if (this.isActive && this.audio && !mainVideo.paused && !this.isAdActive()) {
+              if (this.isActive && this.audio && !mainVideo.paused && !this.isAdActive() && !this._userPaused) {
                 this.audio.play().catch(() => {});
               }
             };
@@ -2305,7 +2488,8 @@
       this._reconnectAttempts = 0;
       this._isAudioBuffering = false;
       this._isSeeking = false;
-      this._userPaused = false;
+      // Clear pause lock + reassert interval (do not leave the 150ms timer running)
+      this.unlockPlay();
       this._hasDispatchedEnded = false;
       if (this._seekDebounceTimer) {
         clearTimeout(this._seekDebounceTimer);
@@ -2342,6 +2526,7 @@
       // Accept both reason spellings — upstream 0.1.7 uses the longer SABR label.
       const isNativeTv774 = reason === 'Native TV 774 stream' || reason === 'Native TV 774 SABR stream';
       if (!isNativeTv774) {
+        sabrRewrite.on = false;
         status.activeAudioItag = 251;
         status.activeMethod = 'original';
         status.fallbackReason = reason || 'Native 251 Fallback';
@@ -2865,29 +3050,28 @@
         // Stripping origAudio causes YouTube to abort MSE and fall back to progressive format 18 (locked to 360p).
         json.streamingData.adaptiveFormats = [...videoFormats, ...origAudio];
       } else {
-        // TVHTML5 Authenticated 774 Stream: upgrade 251 and retain SABR pipeline
+        // TVHTML5 SABR 774 (no direct URL). The web player only speaks its own format
+        // table, so 774 must ride under the 251 slot. NEVER spread `...best774` over
+        // orig251: that clobbers serverAbrStreamingUrl / url / signatureCipher / ranges /
+        // lastModified and the player dies with "An error occurred". Never emit a raw
+        // itag-774 adaptiveFormat either — unknown itag is rejected the same way.
+        // Keep orig251's entire streaming identity; only lift display-quality fields.
         const preciseBps = getPreciseBitrate(best774);
         const upgraded251 = {
           ...orig251,
-          ...best774,
           itag: 251,
           _origItag: 774,
-          mimeType: 'audio/webm; codecs="opus"',
-          bitrate: preciseBps,
-          averageBitrate: best774.averageBitrate || preciseBps,
-          audioQuality: 'AUDIO_QUALITY_HIGH',
-          lastModified: best774.lastModified || orig251.lastModified,
-          contentLength: best774.contentLength || orig251.contentLength
-        };
-        const raw774 = {
-          ...best774,
-          itag: 774,
-          _origItag: 774,
-          mimeType: 'audio/webm; codecs="opus"',
-          bitrate: preciseBps,
+          mimeType: orig251.mimeType || 'audio/webm; codecs="opus"',
+          bitrate: orig251.bitrate || preciseBps,
+          averageBitrate: orig251.averageBitrate || best774.averageBitrate || preciseBps,
+          audioQuality: orig251.audioQuality || 'AUDIO_QUALITY_HIGH',
         };
         const otherAudio = origAudio.filter(f => f.itag !== 251);
-        json.streamingData.adaptiveFormats = [...videoFormats, ...otherAudio, upgraded251, raw774];
+        json.streamingData.adaptiveFormats = [...videoFormats, ...otherAudio, upgraded251];
+        // Arm the SABR body rewriter (251→774). Without this the player still
+        // requests 251 and we would be claiming 774 while serving 251 audio.
+        sabrRewrite.on = true;
+        sabrRewrite.lastModified = Number(best774?.lastModified || best774?.last_modified || 0);
         StudioEngine774.stopAndUnmute('Native TV 774 SABR stream');
       }
 
@@ -3408,6 +3592,32 @@
       console.warn(TAG, '[OptionC] sabrRewritePreferredAudio error:', e);
       return null;
     }
+  }
+
+  // Convert fetch/XHR body to Uint8Array, or null if not binary.
+  function ytssBodyToU8(body) {
+    if (!body) return null;
+    if (body instanceof Uint8Array) return body;
+    if (body instanceof ArrayBuffer) return new Uint8Array(body);
+    if (ArrayBuffer.isView(body)) return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+    return null;
+  }
+
+  // Rewrite a SABR/UMP POST body so preferred-audio / selected-format ask for 774.
+  // No-op unless noteTvNative774 armed us and StudioEngine is not already playing 774.
+  // Returns a Uint8Array to send, or null when the caller should pass the body through.
+  function ytssMaybeRewriteSabrBody(body) {
+    if (!S.enabled || !sabrRewrite.on || StudioEngine774.isActive) return null;
+    if (status.fallbackReason) return null;
+    const bytes = ytssBodyToU8(body);
+    if (!bytes || bytes.length < 8) return null;
+    // 251 ↔ 774 are both 2-byte varints; 140 is left alone unless we later spoof AAC.
+    const patched = sabrRewritePreferredAudio(bytes, [251], 774, sabrRewrite.lastModified || 0);
+    if (patched && patched !== bytes) {
+      console.log(TAG, `[OptionC] SABR body rewritten itag 251→774 (${bytes.length}B)`);
+      return patched;
+    }
+    return null;
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -4471,14 +4681,15 @@
     if (audioOnlyBtn) {
       if (S.audioOnly && S.enabled) {
         audioOnlyBtn.style.color = '#00e5ff';
-        audioOnlyBtn.style.borderColor = '#00e5ff';
-        audioOnlyBtn.style.background = 'rgba(0, 229, 255, 0.25)';
-        audioOnlyBtn.style.boxShadow = '0 0 6px rgba(0, 229, 255, 0.4)';
+        audioOnlyBtn.style.borderColor = 'rgba(0,229,255,0.55)';
+        audioOnlyBtn.style.background = 'rgba(0, 229, 255, 0.12)';
+        audioOnlyBtn.style.boxShadow = 'none';
         audioOnlyBtn.title = t('hudAudioOnlyOn');
       } else {
-        audioOnlyBtn.style.color = '#aaa';
-        audioOnlyBtn.style.borderColor = '#555';
-        audioOnlyBtn.style.background = 'rgba(0, 0, 0, 0.5)';
+        // Same chip as the codec badge; cyan tint kept for the headphone glyph
+        audioOnlyBtn.style.color = 'rgba(0,229,255,0.85)';
+        audioOnlyBtn.style.borderColor = 'rgba(0,229,255,0.35)';
+        audioOnlyBtn.style.background = 'transparent';
         audioOnlyBtn.style.boxShadow = 'none';
         audioOnlyBtn.title = t('hudAudioOnlyOff');
       }
@@ -4500,8 +4711,12 @@
       if (!S.enabled) {
         const container = document.getElementById('ytss-vol-container');
         if (container) container.style.display = 'none';
+        const group = document.getElementById('ytss-bar-group');
+        if (group) group.style.display = 'none';
         const bar = document.getElementById('ytss-badge-bar');
         if (bar) bar.style.display = 'none';
+        const ao = document.getElementById('ytss-audio-only-btn');
+        if (ao) ao.style.display = 'none';
         const under = document.getElementById('ytss-badge-under');
         if (under) under.remove();
         return;
@@ -4526,8 +4741,18 @@
         || left.querySelector('.ytp-time-current')
         || left.querySelector('[class*="time"]');
 
+      // One flex group holds codec badge + audio-only pill so they cannot drift apart
+      let group = document.getElementById('ytss-bar-group');
+      if (!group) {
+        group = document.createElement('div');
+        group.id = 'ytss-bar-group';
+        group.style.cssText = 'display:inline-flex;align-items:center;height:28px;margin:0 0 0 4px;vertical-align:middle;flex:0 0 auto;position:relative;z-index:11;user-select:none;';
+      } else {
+        group.style.display = 'inline-flex';
+      }
+
       let badge = document.getElementById('ytss-badge-bar');
-      if (!badge) {
+      if (!badge || badge.parentElement !== group) {
         badge = document.createElement('span');
         badge.id = 'ytss-badge-bar';
         badge.className = 'ytss-bar-badge';
@@ -4537,6 +4762,7 @@
           e.stopPropagation();
           InPlayerSettingsUI.toggle();
         });
+        group.appendChild(badge);
       }
 
       // Match .ytp-time-display (line-height: 28px) so centers line up
@@ -4547,7 +4773,7 @@
         'height:28px',
         'line-height:28px',
         'padding:0 5px',
-        'margin:0 0 0 8px',
+        'margin:0',
         'box-sizing:border-box',
         'background:transparent',
         'border:1px solid rgba(225,29,29,0.5)',
@@ -4556,18 +4782,53 @@
         'letter-spacing:0.2px',
         'color:#e85a5a',
         'cursor:pointer',
-        'user-select:none',
-        'vertical-align:middle',
         'white-space:nowrap',
-        'position:relative',
-        'z-index:11',
         'flex:0 0 auto'
       ].join(';');
 
+      // Audio-Only pill — always sibling of the badge inside the same group
+      let aoBtn = document.getElementById('ytss-audio-only-btn');
+      if (!aoBtn || aoBtn.parentElement !== group) {
+        if (aoBtn) aoBtn.remove();
+        aoBtn = document.createElement('div');
+        aoBtn.id = 'ytss-audio-only-btn';
+        aoBtn.setAttribute('role', 'button');
+        aoBtn.setAttribute('aria-label', 'Audio-Only Mode');
+        // Headphone icon (currentColor) — cyan accent like stock YT control
+        aoBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3a9 9 0 0 0-9 9v7a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2H5v-1a7 7 0 0 1 14 0v1h-2a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-7a9 9 0 0 0-9-9z"/></svg>';
+        aoBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          toggleAudioOnly();
+        });
+        group.appendChild(aoBtn);
+      }
+      // Base look = same chip geometry as the codec badge (2px radius / 28px / 1px border)
+      aoBtn.style.cssText = [
+        'display:inline-flex',
+        'align-items:center',
+        'justify-content:center',
+        'height:28px',
+        'line-height:28px',
+        'width:30px',
+        'margin:0 0 0 4px',
+        'padding:0 4px',
+        'box-sizing:border-box',
+        'background:transparent',
+        'border:1px solid rgba(0,229,255,0.5)',
+        'border-radius:2px',
+        'color:#00e5ff',
+        'cursor:pointer',
+        'flex:0 0 auto',
+        'transition:color 0.2s,border-color 0.2s,background 0.2s,box-shadow 0.2s'
+      ].join(';');
+
+      // Keep group anchored right after the time display
       if (time && time.parentElement) {
-        time.insertAdjacentElement('afterend', badge);
-      } else if (badge.parentElement !== left) {
-        left.appendChild(badge);
+        if (group.previousElementSibling !== time) {
+          time.insertAdjacentElement('afterend', group);
+        }
+      } else if (group.parentElement !== left) {
+        left.appendChild(group);
       }
     },
 
@@ -4722,6 +4983,8 @@
       StudioEngine774.init();
       StatsForNerdsSpoofer.init();
       PlayerBadgeUI.inject();
+      // Burst inject so the chips land with the bar, not 1.5s later
+      [0, 50, 150, 400, 900].forEach((ms) => setTimeout(() => PlayerBadgeUI.inject(), ms));
       applyAudioOnlyState();
       const currentVid = getVideoIdFromUrl();
       const pLoudness = window.ytInitialPlayerResponse?.playerConfig?.audioConfig?.loudnessDb
@@ -4757,7 +5020,7 @@
   }, 1500);
 
   // ═══════════════════════════════════════════════════════════════════
-  // INTERCEPTORS — fetch & XHR (response-only, no request modification)
+  // INTERCEPTORS — fetch & XHR (player-response patch + SABR body rewrite)
   // ═══════════════════════════════════════════════════════════════════
   window.fetch = async function (...args) {
     let url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
@@ -4929,6 +5192,22 @@
       }));
     }
 
+    // ── SABR/UMP body rewrite (Option C): ask the server for real itag 774 ──
+    // Structural protobuf patch only (f16.f1 / f2.f1). Signed region f5 is never
+    // touched, and the request URL is left alone — URL param rewrites break sigs.
+    if (url.includes('googlevideo.com/videoplayback') && args[1] && args[1].body) {
+      try {
+        const patched = ytssMaybeRewriteSabrBody(args[1].body);
+        if (patched) {
+          const opts = { ...args[1], body: patched };
+          // Keep Request/string first arg as-is; only swap the init body.
+          args = [args[0], opts];
+        }
+      } catch (e) {
+        console.warn(TAG, '[OptionC] fetch body rewrite failed:', e);
+      }
+    }
+
     const finalResponse = await ORIGINAL_FETCH.apply(this, args);
     if (url.includes('googlevideo.com/videoplayback') && (finalResponse.status === 403 || finalResponse.status === 401)) {
       const urlObj = new URL(url);
@@ -5008,8 +5287,16 @@
   XMLHttpRequest.prototype.send = function (...args) {
     const url = this._ytssUrl;
 
-    // NOTE: the SABR/UMP binary body patcher that used to run here was removed for
-    // the same reason as the fetch-side one — see the comment in window.fetch.
+    // SABR/UMP binary body rewrite (Option C). Same rules as the fetch path:
+    // protobuf itag patch only, never touch the request URL signature.
+    if (url && typeof url === 'string' && url.includes('googlevideo.com/videoplayback') && args[0]) {
+      try {
+        const patched = ytssMaybeRewriteSabrBody(args[0]);
+        if (patched) args = [patched, ...args.slice(1)];
+      } catch (e) {
+        console.warn(TAG, '[OptionC] XHR body rewrite failed:', e);
+      }
+    }
 
     if (url && typeof url === 'string' && url.includes('/youtubei/v1/player') && !url.includes('_ytss=1')) {
       const self = this;
