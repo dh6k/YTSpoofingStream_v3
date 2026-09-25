@@ -840,7 +840,7 @@
            (this.closest && this.closest('#movie_player, .html5-video-player')));
         if (isEngineAudio || isMainVideo) {
           const g = window.__ytssPauseGesture;
-          const userPauseIntent = g && !g.wasPaused && (Date.now() - g.at) < 450;
+          const userPauseIntent = g && !g.wasPaused && !fsBusy() && (Date.now() - g.at) < 450;
           if (userPauseIntent && typeof StudioEngine774.lockPause === 'function') {
             StudioEngine774.lockPause();
           } else if (!StudioEngine774._userPaused) {
@@ -862,6 +862,29 @@
 
   // Trusted gesture tracker: distinguish user "play" from V3 auto-resume.
   // Any trusted press counts — V3 chrome may use custom buttons outside .ytp-*.
+  window.__ytssFsBusyUntil = 0;
+  const onFsChange = () => {
+    // Enter/exit fullscreen emits pause/emptied/state noise. Never let that
+    // look like a user pause (that froze playback on exit fullscreen).
+    window.__ytssFsBusyUntil = Date.now() + 900;
+    window.__ytssPauseGesture = { at: 0, wasPaused: true, used: true };
+    try {
+      const eng = (typeof StudioEngine774 !== 'undefined') ? StudioEngine774 : null;
+      if (eng && eng._userPaused) {
+        const p = document.getElementById('movie_player');
+        const ytPlaying = p && typeof p.getPlayerState === 'function' &&
+          (p.getPlayerState() === 1 || p.getPlayerState() === 3);
+        const v = getMainVideoElement();
+        if (ytPlaying || (v && !v.paused && !v.ended)) {
+          eng.unlockPlay();
+        }
+      }
+    } catch (e) {}
+  };
+  document.addEventListener('fullscreenchange', onFsChange, true);
+  document.addEventListener('webkitfullscreenchange', onFsChange, true);
+  const fsBusy = () => Date.now() < (window.__ytssFsBusyUntil || 0);
+
   document.addEventListener('pointerdown', (e) => {
     if (!e.isTrusted) return;
     const v = getMainVideoElement();
@@ -1653,7 +1676,7 @@
           }
           if (this._isInternalVideoSync || this._isSeeking) return;
           const g = window.__ytssPauseGesture;
-          const userPauseIntent = g && !g.wasPaused && (Date.now() - g.at) < 450;
+          const userPauseIntent = g && !g.wasPaused && !fsBusy() && (Date.now() - g.at) < 450;
           // Only sticky-lock on user pause. Engine/MSE pause events otherwise
           // just stop 774 audio alongside the video.
           if (userPauseIntent) {
@@ -1844,7 +1867,8 @@
         player.addEventListener('onStateChange', (state) => {
           if (state === 2) {
             // YT paused (UI button / space / media session through player)
-            this.lockPause();
+            // Ignore state 2 noise during fullscreen transitions.
+            if (!fsBusy()) this.lockPause();
             return;
           }
           // state 1/3 can be fired by V3 auto-resume — never unlock here.

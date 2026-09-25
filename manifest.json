@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ytspoofingstream (vorapis edition)",
-  "version": "0.2.6",
+  "version": "0.2.6.1",
   "description": "Force Studio Opus 774 on YouTube. Runs alongside Project VORAPIS v3 (userscript).",
   "update_url": "https://raw.githubusercontent.com/dh6k/YTSpoofingStream_v3/main/update/updates.xml",
   "icons": {
