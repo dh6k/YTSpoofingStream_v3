@@ -805,9 +805,14 @@
         (this.closest && this.closest('#movie_player, .html5-video-player'))
       );
       if (eng._userPaused && (isEngAudio || isMainVid)) {
-        const curVid = (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
-        // Different video (autoplay / user picked a new one) — drop stale lock.
-        if (eng.pauseLockIsStale && eng.pauseLockIsStale(curVid)) {
+        // Use player API id — URL often still shows the previous video
+        // right when YT calls play() for the new one (autoplay/selection).
+        const curVid = (typeof eng.currentPlaybackVid === 'function')
+          ? eng.currentPlaybackVid()
+          : (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
+        const v = getMainVideoElement();
+        const freshLoad = !!(v && v.paused && (v.currentTime === 0 || v.readyState === 0));
+        if (eng.pauseLockIsStale && (eng.pauseLockIsStale(curVid) || freshLoad)) {
           eng.unlockPlay();
         } else {
           // Same video: one-shot trusted "play" gesture. Consume it so V3's
@@ -1076,7 +1081,9 @@
       try {
         this._userPaused = true;
         this._pauseLockUntil = Date.now() + 60000;
-        this._pauseLockVid = (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null) || this.activeVideoId;
+        this._pauseLockVid = (typeof this.currentPlaybackVid === 'function' && this.currentPlaybackVid())
+          || (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null)
+          || this.activeVideoId;
         const apply = () => {
           if (!this._userPaused) return;
           try {
@@ -1103,9 +1110,21 @@
         this._pauseReassert = null;
       }
     },
-    // True when a pause lock belongs to a different video than `vid`.
+    // True when a pause lock does not belong to `vid` (or lock has no identity).
     pauseLockIsStale(vid) {
-      return this._userPaused && this._pauseLockVid && vid && this._pauseLockVid !== vid;
+      if (!this._userPaused) return false;
+      if (!this._pauseLockVid) return true;
+      if (!vid) return false;
+      return this._pauseLockVid !== vid;
+    },
+    // Best current video id: player API first (URL can lag SPA navigation).
+    currentPlaybackVid() {
+      try {
+        const p = document.getElementById('movie_player');
+        const pv = p?.getVideoData?.()?.video_id;
+        if (pv) return pv;
+      } catch (e) {}
+      return (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
     },
     // Engine-internal resume: never yank playback after a user/media-key pause.
     _tryPlayAudio() {
@@ -1708,10 +1727,12 @@
       this._hookedVideos.add(video);
       try {
         video.addEventListener('loadstart', () => {
-          const vid = (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
-          if (this.pauseLockIsStale(vid) || (this._userPaused && vid && vid !== this._pauseLockVid)) {
-            this.unlockPlay();
-          }
+          // New media load = new playback context. Always drop pause lock so
+          // click-to-play / autoplay after a pause is never swallowed.
+          if (this._userPaused) this.unlockPlay();
+        }, { passive: true });
+        video.addEventListener('emptied', () => {
+          if (this._userPaused) this.unlockPlay();
         }, { passive: true });
       } catch (e) {}
       this.hookVideoVolume(video);
