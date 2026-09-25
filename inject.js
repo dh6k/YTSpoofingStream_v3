@@ -5224,9 +5224,8 @@
       Object.assign(S, pickSettings(newSettings));
       persistSettings();
       handleSettingsChange();
-      if (newSettings.shadowVolume !== undefined) {
-        NativeAudioBooster.setVolume(newSettings.shadowVolume);
-      }
+      // shadowVolume is persisted for storage compat; actual gain is applied via
+      // StudioEngine774.syncVol. NativeAudioBooster no longer exists.
       if (S.autoReload && window.location.href.includes('youtube.com')) {
         window.location.reload();
       }
