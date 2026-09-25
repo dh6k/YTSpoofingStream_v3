@@ -805,13 +805,21 @@
         (this.closest && this.closest('#movie_player, .html5-video-player'))
       );
       if (eng._userPaused && (isEngAudio || isMainVid)) {
-        // Allow only a fresh trusted "play" gesture (button / space / k).
-        const g = window.__ytssPauseGesture;
-        const gestureOk = g && g.wasPaused && (Date.now() - g.at) < 500;
-        if (!gestureOk) {
-          return Promise.resolve();
+        const curVid = (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
+        // Different video (autoplay / user picked a new one) — drop stale lock.
+        if (eng.pauseLockIsStale && eng.pauseLockIsStale(curVid)) {
+          eng.unlockPlay();
+        } else {
+          // Same video: one-shot trusted "play" gesture. Consume it so V3's
+          // play() loop cannot keep re-entering during the window (flicker).
+          const g = window.__ytssPauseGesture;
+          const gestureOk = g && g.wasPaused && !g.used && (Date.now() - g.at) < 800;
+          if (!gestureOk) {
+            return Promise.resolve();
+          }
+          g.used = true;
+          eng.unlockPlay();
         }
-        if (typeof eng.unlockPlay === 'function') eng.unlockPlay();
       }
       if (!eng._userPaused && this !== eng.audio && eng.isActive && !eng.isAdActive()) {
         try { descVolume.set.call(this, 0); } catch (e) {}
@@ -821,9 +829,8 @@
     return origPlay.apply(this, args);
   };
 
-  // Pause interceptor: OS media keys / Chrome media widget often pause only the
-  // audible <audio>. Flag that as a user pause and park the video too so the
-  // watchdog cannot resume audio behind the user's back.
+  // Pause interceptor. Only arm the sticky lock on real user-intent pause.
+  // Engine/MSE pause() calls must not start a 150ms fight with play() (icon flicker).
   HTMLMediaElement.prototype.pause = function(...args) {
     try {
       if (typeof StudioEngine774 !== 'undefined' && StudioEngine774.isActive && !StudioEngine774.isAdActive()) {
@@ -832,10 +839,16 @@
           ((this.classList && this.classList.contains('html5-main-video')) ||
            (this.closest && this.closest('#movie_player, .html5-video-player')));
         if (isEngineAudio || isMainVideo) {
-          if (typeof StudioEngine774.lockPause === 'function') {
+          const g = window.__ytssPauseGesture;
+          const userPauseIntent = g && !g.wasPaused && (Date.now() - g.at) < 450;
+          if (userPauseIntent && typeof StudioEngine774.lockPause === 'function') {
             StudioEngine774.lockPause();
-          } else {
-            StudioEngine774._userPaused = true;
+          } else if (!StudioEngine774._userPaused) {
+            // Non-user pause (buffer/seek/MSE): park the sibling only, no sticky lock.
+            const other = isEngineAudio ? getMainVideoElement() : StudioEngine774.audio;
+            if (other && !other.paused) {
+              try { origPause.call(other); } catch (e) {}
+            }
           }
           const other = isEngineAudio ? getMainVideoElement() : StudioEngine774.audio;
           if (other && !other.paused) {
@@ -848,15 +861,14 @@
   };
 
   // Trusted gesture tracker: distinguish user "play" from V3 auto-resume.
+  // Any trusted press counts — V3 chrome may use custom buttons outside .ytp-*.
   document.addEventListener('pointerdown', (e) => {
     if (!e.isTrusted) return;
     const v = getMainVideoElement();
-    const inPlayer = e.target && e.target.closest &&
-      e.target.closest('#movie_player, .html5-player-chrome, .ytp-chrome-bottom, .ytp-control-bar, .ytp-pause-overlay, .ytp-large-play-button');
-    if (!inPlayer) return;
     window.__ytssPauseGesture = {
       at: Date.now(),
       wasPaused: !!(v && (v.paused || v.ended)),
+      used: false,
     };
   }, true);
   document.addEventListener('keydown', (e) => {
@@ -866,6 +878,7 @@
       window.__ytssPauseGesture = {
         at: Date.now(),
         wasPaused: !!(v && (v.paused || v.ended)),
+        used: false,
       };
     }
   }, true);
@@ -1029,30 +1042,47 @@
     _userPaused: false,
     _pauseLockUntil: 0,
     _pauseReassert: null,
-    // Sticky pause: keep forcing pause until the user explicitly plays again.
-    // Vorapis/V3 calls play() in loops; a short lock is not enough.
+    _pauseLockVid: null,
+    _locking: false,
+    // Sticky pause for ONE video. New video / autoplay must not inherit the lock
+    // (that killed autoplay and made play need two clicks). Also sync YT player
+    // state so the control bar does not show a stale pause/play icon.
     lockPause() {
-      this._userPaused = true;
-      this._pauseLockUntil = Date.now() + 60000;
-      const apply = () => {
-        if (!this._userPaused) return;
-        try {
-          if (this.audio && !this.audio.paused) this.audio.pause();
-          const v = getMainVideoElement();
-          if (v && !v.paused && !v.ended) v.pause();
-        } catch (e) {}
-      };
-      apply();
-      if (this._pauseReassert) clearInterval(this._pauseReassert);
-      this._pauseReassert = setInterval(apply, 150);
+      if (this._locking) return;
+      this._locking = true;
+      try {
+        this._userPaused = true;
+        this._pauseLockUntil = Date.now() + 60000;
+        this._pauseLockVid = (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null) || this.activeVideoId;
+        const apply = () => {
+          if (!this._userPaused) return;
+          try {
+            if (this.audio && !this.audio.paused) this.audio.pause();
+            const v = getMainVideoElement();
+            if (v && !v.paused && !v.ended) v.pause();
+            // Do NOT call player.pauseVideo() here. That fights play() and makes
+            // the control-bar icon flicker; only the media elements are stamped.
+          } catch (e) {}
+        };
+        apply();
+        if (this._pauseReassert) clearInterval(this._pauseReassert);
+        this._pauseReassert = setInterval(apply, 150);
+      } finally {
+        this._locking = false;
+      }
     },
     unlockPlay() {
       this._userPaused = false;
       this._pauseLockUntil = 0;
+      this._pauseLockVid = null;
       if (this._pauseReassert) {
         clearInterval(this._pauseReassert);
         this._pauseReassert = null;
       }
+    },
+    // True when a pause lock belongs to a different video than `vid`.
+    pauseLockIsStale(vid) {
+      return this._userPaused && this._pauseLockVid && vid && this._pauseLockVid !== vid;
     },
     // Engine-internal resume: never yank playback after a user/media-key pause.
     _tryPlayAudio() {
@@ -1571,9 +1601,15 @@
 
         if (e.type === 'play' || e.type === 'playing') {
           if (this._userPaused) {
-            // V3/MSE auto-resume race — keep the user's pause.
-            this.lockPause();
-            return;
+            const curVid = (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
+            if (this.pauseLockIsStale(curVid)) {
+              // Autoplay / new video — do not inherit previous pause.
+              this.unlockPlay();
+            } else {
+              // V3/MSE auto-resume race on the SAME video — keep the user's pause.
+              this.lockPause();
+              return;
+            }
           }
           // Playback Safety Guard: verify audio engine is playing for current active video
           if (this.isActive && this.activeVideoId && !isCurrentWatchVideo(this.activeVideoId)) {
@@ -1613,11 +1649,18 @@
           }
         } else if (e.type === 'pause') {
           if (video.ended) {
-            // Video ended naturally; do NOT abruptly kill audio while audio is finishing
             return;
           }
-          // User-initiated pause always wins — even mid internal sync.
-          this.lockPause();
+          if (this._isInternalVideoSync || this._isSeeking) return;
+          const g = window.__ytssPauseGesture;
+          const userPauseIntent = g && !g.wasPaused && (Date.now() - g.at) < 450;
+          // Only sticky-lock on user pause. Engine/MSE pause events otherwise
+          // just stop 774 audio alongside the video.
+          if (userPauseIntent) {
+            this.lockPause();
+          } else if (!this._userPaused && this.audio && !this.audio.paused) {
+            this.audio.pause();
+          }
         } else if (e.type === 'loadedmetadata' || e.type === 'canplay') {
           if (!this.isAdActive() && !document.hidden && !this._isInternalVideoSync && !this._isVolScrubbing) {
             this._silenceElement(video);
@@ -1632,7 +1675,7 @@
       };
 
       const captureOpts = { capture: true, passive: true };
-      ['play', 'playing', 'pause', 'waiting', 'seeking', 'seeked', 'ratechange', 'volumechange', 'loadedmetadata', 'canplay', 'ended'].forEach(evt => {
+      ['play', 'playing', 'pause', 'waiting', 'seeking', 'seeked', 'ratechange', 'volumechange', 'loadedmetadata', 'canplay', 'ended', 'loadstart', 'emptied'].forEach(evt => {
         document.addEventListener(evt, onVideoEvent, captureOpts);
       });
     },
@@ -1640,6 +1683,14 @@
     hookVideo(video) {
       if (!video || this._hookedVideos.has(video)) return;
       this._hookedVideos.add(video);
+      try {
+        video.addEventListener('loadstart', () => {
+          const vid = (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
+          if (this.pauseLockIsStale(vid) || (this._userPaused && vid && vid !== this._pauseLockVid)) {
+            this.unlockPlay();
+          }
+        }, { passive: true });
+      } catch (e) {}
       this.hookVideoVolume(video);
       video.addEventListener('timeupdate', () => {
         if (typeof NextVideoManager !== 'undefined') {
@@ -1733,6 +1784,12 @@
           const newVid = player.getVideoData?.()?.video_id || (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
           if (newVid && (newVid !== this.activeVideoId || !this.isActive)) {
             console.log(TAG, `[PlayerVideoDataChange] Video active inside player: ${newVid} (was ${this.activeVideoId}, active: ${this.isActive})`);
+            // New track only: never inherit the previous video's pause lock.
+            // Do NOT unlock just because _userPaused — videodatachange can fire
+            // on the SAME video while paused and would fight the user (flicker).
+            if (this.pauseLockIsStale(newVid)) {
+              this.unlockPlay();
+            }
             navTargetVideoId = newVid;
             failedSourcesPerVideo.delete(newVid);
             failedFetches.delete(newVid);
@@ -4746,7 +4803,7 @@
       if (!group) {
         group = document.createElement('div');
         group.id = 'ytss-bar-group';
-        group.style.cssText = 'display:inline-flex;align-items:center;height:28px;margin:0 0 0 4px;vertical-align:middle;flex:0 0 auto;position:relative;z-index:11;user-select:none;';
+        group.style.cssText = 'display:inline-flex;align-items:center;height:28px;margin:0 0 0 14px;vertical-align:middle;flex:0 0 auto;position:relative;z-index:11;user-select:none;';
       } else {
         group.style.display = 'inline-flex';
       }
