@@ -5,7 +5,7 @@
   <p><sub>Fork of <a href="https://github.com/alithw/YTSpoofingStream">alithw/YTSpoofingStream</a> — modified to run alongside <a href="https://github.com/VORAPIS/V3">Project VORAPIS v3</a></sub></p>
 
   <p>
-    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.3-blue.svg?style=flat-square" alt="Latest Release"></a>
+    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.4-blue.svg?style=flat-square" alt="Latest Release"></a>
     <img src="https://img.shields.io/badge/manifest-v3-green.svg?style=flat-square" alt="Manifest V3">
     <img src="https://img.shields.io/badge/fork-vorapis%20edition-orange.svg?style=flat-square" alt="Vorapis Edition Fork">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=flat-square" alt="License Apache 2.0">
@@ -18,8 +18,8 @@
 
 > [!IMPORTANT]
 > **This is a fork, not the upstream project.**
-> Upstream: [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream) (latest upstream stable: v0.1.7).
-> This fork (**vorapis edition**, current: **v0.2.3**) adapts the YTSS engine to coexist with Project VORAPIS v3 and ships its own CRX packaging / auto-update feed.
+> Upstream: [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream) (latest upstream stable: v0.2.0).
+> This fork (**vorapis edition**, current: **v0.2.4**) adapts the YTSS engine to coexist with Project VORAPIS v3 and ships its own CRX packaging / auto-update feed. Upstream v0.2.0 features (Audio-Only, dynamic i18n, stats) are integrated.
 > Report issues and download releases from **this repository** (`dh6k/YTSpoofingStream_v3`), not upstream.
 
 > [!WARNING]
@@ -40,6 +40,7 @@
 ---
 
 ## 📑 Table of Contents
+- [✨ Recent Update Highlights (v0.2.0)](#recent-updates)
 - [🌟 Why YTSpoofingStream?](#-why-ytspoofingstream)
 - [✨ Architectural Evolution in v0.1.3](#-architectural-evolution-in-v013)
 - [🧠 Architecture Deep Dive](#-architecture-deep-dive)
@@ -58,6 +59,18 @@
 - [🤝 Contributing & Community](#-contributing--community)
 - [⚠️ Disclaimer](#️-disclaimer)
 - [📄 License](#-license)
+
+---
+
+<a id="recent-updates"></a>
+## ✨ Recent Update Highlights (v0.2.0)
+
+The **v0.2.0** release focuses on user experience enhancements, ultra-low resource footprint, and system stability:
+
+- 🎧 **Audio-Only Mode**: Background music listening with minimal system resource consumption. Bypasses video rendering pipelines and cuts GPU usage to near-zero while strictly preserving continuous Studio Opus 774 playback without interruptions or stream fallback.
+- 📊 **Detailed Metrics**: Real-time independent audio buffer monitoring (`Audio Buffer`) integrated directly into YouTube's native *Stats for Nerds* overlay, complemented by rich HUD badge tooltips.
+- ⚡ **Stability & UX Enhancements**: Automatic dynamic multi-language synchronization (i18n), eliminated player freezing/lag when viewing statistics, and improved player control bar alignment.
+- 👉 *See the full changelog and details in the [**Release Notes (v0.2.0)**](https://github.com/alithw/YTSpoofingStream/releases/tag/v0.2.0).*
 
 ---
 
@@ -193,13 +206,16 @@ CI: push tag `v0.2.3` (or run **Package CRX** workflow). Store `key.pem` as repo
 
 ## 🚀 Installation
 
-### Chromium Browsers (Google Chrome, Brave, Edge, Opera)
-1. Clone or download **this fork** (`main` branch):
-   ```bash
-   git clone https://github.com/dh6k/YTSpoofingStream_v3.git
-   ```
+### Chromium Browsers (Google Chrome, Brave, Edge, Opera, Cốc Cốc)
+1. Get **this fork** (`main` branch):
+   - **For standard users (No Git required)**:
+     Click the green **Code** button at the top of this repository and select **Download ZIP** (or visit [Releases](https://github.com/dh6k/YTSpoofingStream_v3/releases), scroll to *Assets*, and download `Source code (zip)`). Extract the ZIP to a folder on your computer.
+   - **For developers (using Git)**:
+     ```bash
+     git clone https://github.com/dh6k/YTSpoofingStream_v3.git
+     ```
 2. Open `chrome://extensions/` and toggle on **Developer mode** in the top-right corner.
-3. Click **Load unpacked** and select the `YTSpoofingStream_v3` folder.
+3. Click **Load unpacked** and select the extracted `YTSpoofingStream_v3` folder.
 4. Open YouTube, ensure you are logged into your Premium account, and verify the `★ 774` badge in the player control bar!
 
 > [!NOTE]
@@ -207,18 +223,22 @@ CI: push tag `v0.2.3` (or run **Package CRX** workflow). Store `key.pem` as repo
 
 ---
 
-## 🌐 Localization
+## 🌐 Localization & Adding Your Language
 
-The popup ships with **English** and **Tiếng Việt** and auto-detects your browser language on first run. Switch anytime via the language dropdown in the popup header; the choice is stored in `chrome.storage.local`.
+YTSpoofingStream supports multiple languages out of the box (currently English and Tiếng Việt) with automatic browser language detection. Switch anytime via the language dropdown in the popup header; the choice is stored in `chrome.storage.local`.
 
-### Contribute a language
+### Want to contribute your language?
+We welcome community translations! You can easily add your native language in 3 steps:
 
-1. Copy [`locales/template.json`](locales/template.json) and rename it to your ISO 639-1 code (e.g. `ja.json`, `ko.json`, `fr.json`) inside `locales/`.
-2. Translate the values. Keep placeholders (`{version}`, `{method}`, `{label}`, `{error}`, `{url}`) and symbols (★, •, ↻, ⟳) intact.
-3. Add `<option value="code">Language Name</option>` to `#langSelect` in `popup.html`.
-4. Open a PR.
-
----
+1. **Copy the Template**:
+   Duplicate [`locales/template.json`](locales/template.json) and rename it to your ISO 639-1 language code (e.g. `ja.json` for Japanese, `es.json` for Spanish, `ko.json` for Korean, `de.json` for German, etc.) inside the `locales/` directory.
+2. **Translate the Strings**:
+   - Fill in the `_meta` section with your language details and your GitHub username for credit.
+   - Translate each value accurately.
+   - **Important**: Keep placeholder tokens intact (such as `{version}`, `{method}`, `{label}`, `{error}`, `{url}`) and preserve symbols (★, •, ↻, ⟳).
+3. **Register & Submit**:
+   - Add your language `<option value="code">Language Name</option>` to the `#langSelect` dropdown in `popup.html`.
+   - Submit a Pull Request (PR)! We will review, merge, and include it in the next release.
 
 ---
 

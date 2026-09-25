@@ -5,7 +5,7 @@
   <p><sub>Fork của <a href="https://github.com/alithw/YTSpoofingStream">alithw/YTSpoofingStream</a> — chỉnh sửa để chạy song song với <a href="https://github.com/VORAPIS/V3">Project VORAPIS v3</a></sub></p>
 
   <p>
-    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.3-blue.svg?style=flat-square" alt="Phiên bản Mới nhất"></a>
+    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.4-blue.svg?style=flat-square" alt="Phiên bản Mới nhất"></a>
     <img src="https://img.shields.io/badge/manifest-v3-green.svg?style=flat-square" alt="Manifest V3">
     <img src="https://img.shields.io/badge/fork-vorapis%20edition-orange.svg?style=flat-square" alt="Vorapis Edition Fork">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=flat-square" alt="Giấy phép Apache 2.0">
@@ -18,8 +18,8 @@
 
 > [!IMPORTANT]
 > **Đây là fork, không phải dự án gốc.**
-> Dự án gốc: [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream) (phiên bản ổn định gốc: v0.1.7).
-> Fork này (**vorapis edition**, hiện tại: **v0.2.3**) điều chỉnh engine YTSS để chạy song song với Project VORAPIS v3, kèm đóng gói CRX và feed tự cập nhật riêng.
+> Dự án gốc: [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream) (phiên bản ổn định gốc: v0.2.0).
+> Fork này (**vorapis edition**, hiện tại: **v0.2.4**) điều chỉnh engine YTSS để chạy song song với Project VORAPIS v3, kèm đóng gói CRX và feed tự cập nhật riêng. Đã tích hợp các tính năng upstream v0.2.0 (Audio-Only, i18n động, stats).
 > Báo lỗi và tải release từ **repository này** (`dh6k/YTSpoofingStream_v3`), không phải repo gốc.
 
 > [!WARNING]
@@ -40,6 +40,7 @@
 ---
 
 ## 📑 Mục lục
+- [✨ Điểm nổi bật trong bản cập nhật gần đây (v0.2.0)](#recent-updates)
 - [🌟 Tại sao bạn cần YTSpoofingStream?](#-tại-sao-bạn-cần-ytspoofingstream)
 - [✨ Tái cấu trúc Kiến trúc trong bản v0.1.3](#-tái-cấu-trúc-kiến-trúc-trong-bản-v013)
 - [🧠 Phân tích Chuyên sâu](#-phân-tích-chuyên-sâu)
@@ -58,6 +59,18 @@
 - [🤝 Đóng góp & Cộng đồng (Contributing)](#-đóng-góp--cộng-đồng-contributing)
 - [⚠️ Tuyên bố Từ chối Trách nhiệm (Disclaimer)](#️-tuyên-bố-từ-chối-trách-nhiệm-disclaimer)
 - [📄 Giấy phép (License)](#-giấy-phép-license)
+
+---
+
+<a id="recent-updates"></a>
+## ✨ Điểm nổi bật trong bản cập nhật gần đây (v0.2.0)
+
+Bản cập nhật **v0.2.0** tập trung cải thiện mạnh mẽ trải nghiệm người dùng, tối ưu hóa mức tiêu thụ tài nguyên và nâng cao độ ổn định:
+
+- 🎧 **Chế độ Chỉ phát nhạc (Audio-Only Mode)**: Nghe nhạc YouTube thuần túy, tiết kiệm tối đa tài nguyên máy tính. Tắt công đoạn render video và giảm mức tiêu thụ GPU về gần 0% mà vẫn duy trì liên tục luồng Studio Opus 774 không bị mất hay fallback về format thông thường.
+- 📊 **Bổ sung các thông số chi tiết hơn**: Đo đạc và hiển thị thời gian thực chỉ số bộ đệm âm thanh (`Audio Buffer`) độc lập trong bảng *Stats for Nerds* của YouTube, cùng tooltip trạng thái trực quan trên thanh điều khiển.
+- ⚡ **Cải thiện độ ổn định & Trải nghiệm người dùng**: Tự động đồng bộ đa ngôn ngữ (i18n) theo cài đặt extension, loại bỏ triệt để hiện tượng đơ lag player khi bật thống kê, và sửa lỗi co xén nút điều khiển trên player.
+- 👉 *Xem chi tiết đầy đủ toàn bộ thay đổi trong [**Ghi chú Phát hành (Release Notes v0.2.0)**](https://github.com/alithw/YTSpoofingStream/releases/tag/v0.2.0).*
 
 ---
 
@@ -195,12 +208,15 @@ CI: push tag `v0.2.3` (hoặc chạy workflow **Package CRX**). Lưu `key.pem` d
  
 ### Trình duyệt Chromium (Google Chrome, Brave, Edge, Cốc Cốc, Opera)
 1. Tải mã nguồn của **bản fork này** (nhánh `main`):
-   ```bash
-   git clone https://github.com/dh6k/YTSpoofingStream_v3.git
-   ```
+   - **Dành cho người dùng phổ thông (không cần dùng Git)**:
+     Nhấn vào nút **Code** màu xanh lá ở phía trên trang GitHub này rồi chọn **Download ZIP** (hoặc truy cập mục [Releases](https://github.com/dh6k/YTSpoofingStream_v3/releases), kéo xuống dưới cùng của bản phát hành mới nhất tại mục *Assets* và tải file `Source code (zip)`). Sau đó, hãy giải nén file ZIP đó vào một thư mục trên máy tính.
+   - **Dành cho người dùng biết sử dụng Git**:
+     ```bash
+     git clone https://github.com/dh6k/YTSpoofingStream_v3.git
+     ```
 2. Mở trình duyệt Chrome và truy cập `chrome://extensions/`.
 3. Bật **Chế độ dành cho nhà phát triển (Developer mode)** ở góc trên bên phải.
-4. Nhấn nút **Tải tiện ích đã giải nén (Load unpacked)** và chọn thư mục `YTSpoofingStream_v3`.
+4. Nhấn nút **Tải tiện ích đã giải nén (Load unpacked)** và chọn thư mục `YTSpoofingStream_v3` vừa giải nén.
 5. Mở YouTube, đảm bảo đã đăng nhập tài khoản có Premium, và thưởng thức âm thanh chuẩn phòng thu với huy hiệu `★ 774` trên trình phát!
 
 > [!NOTE]
@@ -208,18 +224,22 @@ CI: push tag `v0.2.3` (hoặc chạy workflow **Package CRX**). Lưu `key.pem` d
 
 ---
 
-## 🌐 Đa ngôn ngữ
+## 🌐 Hỗ trợ Đa Ngôn Ngữ & Hướng dẫn Đóng góp Bản dịch
 
-Popup có sẵn **English** và **Tiếng Việt**, tự nhận diện ngôn ngữ trình duyệt lần đầu. Đổi bất kỳ lúc nào qua dropdown góc phải header; lựa chọn lưu trong `chrome.storage.local`.
+YTSpoofingStream hỗ trợ đa ngôn ngữ ngay khi cài đặt (hiện có sẵn Tiếng Anh và Tiếng Việt) cùng tính năng tự động nhận diện ngôn ngữ trình duyệt. Đổi bất kỳ lúc nào qua dropdown góc phải header; lựa chọn lưu trong `chrome.storage.local`.
 
-### Đóng góp ngôn ngữ
+### Bạn muốn bổ sung ngôn ngữ của mình?
+Chúng tôi rất hoan nghênh các bản dịch từ cộng đồng! Bạn có thể đóng góp ngôn ngữ mới chỉ với 3 bước đơn giản:
 
-1. Nhân bản [`locales/template.json`](locales/template.json), đổi tên theo mã ISO 639-1 (vd: `ja.json`, `ko.json`, `fr.json`) trong `locales/`.
-2. Dịch các giá trị. Giữ nguyên placeholder (`{version}`, `{method}`, `{label}`, `{error}`, `{url}`) và ký hiệu (★, •, ↻, ⟳).
-3. Thêm `<option value="code">Tên ngôn ngữ</option>` vào `#langSelect` trong `popup.html`.
-4. Gửi PR.
-
----
+1. **Sao chép file mẫu (Template)**:
+   Nhân bản file [`locales/template.json`](locales/template.json) và đổi tên thành mã ngôn ngữ chuẩn ISO 639-1 của bạn (ví dụ: `ja.json` cho tiếng Nhật, `ko.json` cho tiếng Hàn, `fr.json` cho tiếng Pháp, `de.json` cho tiếng Đức, `es.json` cho tiếng Tây Ban Nha...) đặt trong thư mục `locales/`.
+2. **Dịch các chuỗi văn bản**:
+   - Điền thông tin vào trường `_meta` (tên ngôn ngữ, tên bản địa, mã ngôn ngữ, tác giả/GitHub handle).
+   - Dịch chính xác từng giá trị tương ứng sang ngôn ngữ của bạn.
+   - **Lưu ý quan trọng**: Giữ nguyên các biến placeholder (như `{version}`, `{method}`, `{label}`, `{error}`, `{url}`) và các biểu tượng đặc biệt (★, •, ↻, ⟳). Hạn chế dùng dịch máy thô để đảm bảo câu từ tự nhiên và chuẩn xác.
+3. **Khai báo & Tạo Pull Request**:
+   - Thêm thẻ `<option value="mã_ngôn_ngữ">Tên ngôn ngữ</option>` vào menu dropdown `#langSelect` trong `popup.html`.
+   - Gửi Pull Request (PR) lên repository! Chúng tôi sẽ kiểm tra, merge và phát hành ngay trong phiên bản kế tiếp.
 
 ---
 

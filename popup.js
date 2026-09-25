@@ -1,4 +1,4 @@
-// ytsSpoofingstream (vorapis edition) v0.2.3 — Popup Controller
+// ytsSpoofingstream (vorapis edition) v0.2.4 — Popup Controller
 (function () {
   'use strict';
 
@@ -10,7 +10,7 @@
   let currentLang = 'en';
   let currentLocaleData = {};
   let enLocaleData = {};
-  let tvAuthRender = null;
+  let tvAuthHandler = null;
 
   async function loadLocale(lang) {
     if (localesCache[lang]) return localesCache[lang];
@@ -54,7 +54,12 @@
       langSelect.value = currentLang;
     }
 
-    if (tvAuthRender) tvAuthRender();
+    if (tvAuthHandler && typeof tvAuthHandler.renderAuth === 'function') {
+      tvAuthHandler.renderAuth();
+    }
+
+    applyUI();
+    pollStatus();
   }
 
   async function setLanguage(lang) {
@@ -86,12 +91,14 @@
   // ─── SETTINGS ────────────────────────────────────────────────────
   const KEYS = {
     enabled: '#en',
+    audioOnly: '#ao',
     autoReload: '#ar',
     shadowPlayer: '#sp',
   };
 
   let settings = {
     enabled: true,
+    audioOnly: false,
     autoReload: true,
     operationMode: 'HYBRID_HQ',
     shadowPlayer: true,
@@ -178,17 +185,20 @@
     }
   }
 
-  function save() {
+  function save(e) {
     if ($('#en')) settings.enabled = $('#en').checked;
+    if ($('#ao')) settings.audioOnly = $('#ao').checked;
     if ($('#ar')) settings.autoReload = $('#ar').checked;
     if ($('#sp')) settings.shadowPlayer = $('#sp').checked;
 
+    const isAoOnly = Boolean(e && e.target && e.target.id === 'ao');
+
     applyUI();
     chrome.storage.local.set(settings);
-    log(`Settings saved. OpMode: ${settings.operationMode}, StatsOverride: ${settings.shadowPlayer}`);
+    log(`Settings saved. OpMode: ${settings.operationMode}, AudioOnly: ${settings.audioOnly}, StatsOverride: ${settings.shadowPlayer}`);
 
-    // Note: YouTube page must refresh after applying config
-    // Send settings to content script and trigger reload
+    // Note: YouTube page must refresh after applying config (except for audioOnly live toggle)
+    // Send settings to content script and trigger reload if necessary
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
       const tabId = tabs[0].id;
@@ -196,7 +206,7 @@
       // Send settings to content script (inject.js) via messaging
       chrome.scripting.executeScript({
         target: { tabId },
-        func: (s) => {
+        func: (s, isAo) => {
           localStorage.setItem('ytss_settings', JSON.stringify(s));
           localStorage.setItem('ytSpoofingStream_settings', JSON.stringify(s));
           if (window.YTSS_SpoofingMethods && typeof window.YTSS_SpoofingMethods.applySettings === 'function') {
@@ -204,15 +214,18 @@
           } else {
             window.postMessage({ type: 'YTSpoofingStream_settingsUpdate', settings: s }, '*');
           }
+          if (isAo) {
+            window.postMessage({ type: 'YTSS_SET_AUDIO_ONLY', audioOnly: s.audioOnly }, '*');
+          }
 
-          // Force reload YouTube page to apply new config
-          if (s.autoReload && window.location.href.includes('youtube.com')) {
+          // Force reload YouTube page to apply new config (skip reload for audioOnly toggle)
+          if (!isAo && s.autoReload && window.location.href.includes('youtube.com')) {
             window.location.reload();
           }
         },
-        args: [settings],
+        args: [settings, isAoOnly],
       }, () => {
-        if (settings.autoReload && /youtube\.com/.test(tabs[0].url || '')) {
+        if (!isAoOnly && settings.autoReload && /youtube\.com/.test(tabs[0].url || '')) {
           log('Config applied — reloading YouTube page...');
         }
       });
@@ -295,8 +308,6 @@
       }
     }
 
-    tvAuthRender = renderAuth;
-
     function checkAuth() {
       chrome.runtime.sendMessage({ type: 'CHECK_CLIENT_AUTH', client: clientKey }, (res) => {
         lastAuth = { isAuth: !!(res && res.isAuth) };
@@ -325,7 +336,8 @@
             chrome.runtime.sendMessage({ type: 'CHECK_CLIENT_AUTH', client: clientKey }, (check) => {
               if (check && check.isAuth) {
                 clearInterval(pollUI);
-                checkAuth();
+                lastAuth = { isAuth: true };
+                renderAuth();
                 log(`${labelName} Auth Successful!`);
               }
             });
@@ -339,16 +351,18 @@
 
     $(logoutBtnId)?.addEventListener('click', () => {
       chrome.runtime.sendMessage({ type: 'LOGOUT_CLIENT', client: clientKey }, () => {
-        checkAuth();
+        lastAuth = { isAuth: false };
+        renderAuth();
         log(`${labelName} Logged out.`);
       });
     });
 
     checkAuth();
+    return { renderAuth, checkAuth };
   }
 
   // Set up auth for TVHTML5
-  setupAuthControl('TVHTML5', '#tvAuthStatus', '#tvAuthCodeContainer', '#tvAuthCode', '#btnTvLogin', '#btnTvLogout', 'TVHTML5');
+  tvAuthHandler = setupAuthControl('TVHTML5', '#tvAuthStatus', '#tvAuthCodeContainer', '#tvAuthCode', '#btnTvLogin', '#btnTvLogout', 'TVHTML5');
 
   // ─── EVENT LISTENERS ──────────────────────────────────────────────
   for (const sel of Object.values(KEYS)) {
@@ -400,7 +414,9 @@
         // Status badge
         const badge = $('#stBadge');
         const text = $('#stText');
-        if (settings.enabled === false) {
+        const isEnabled = !!settings.enabled;
+        if (!isEnabled) {
+          badge?.classList.add('off');
           if (text) text.textContent = t('statusDisabled');
         } else if (d.activeAudioItag) {
           badge?.classList.remove('off');
@@ -432,6 +448,18 @@
 
         const streamsEl = $('#iStreams');
         if (streamsEl) streamsEl.textContent = d.injectedStreams ?? 0;
+
+        const audioBufferRow = $('#rowAudioBuffer');
+        const audioBufferEl = $('#iAudioBuffer');
+        const is774 = d.activeAudioItag === 774 || (d.bestAudioInfo && d.bestAudioInfo.includes('774'));
+        if (audioBufferRow && audioBufferEl) {
+          if (is774 && d.audioBufferSec !== undefined && d.audioBufferSec !== null && !isNaN(d.audioBufferSec) && Number(d.audioBufferSec) >= 0) {
+            audioBufferRow.style.display = 'flex';
+            audioBufferEl.textContent = `${Number(d.audioBufferSec).toFixed(1)} s`;
+          } else {
+            audioBufferRow.style.display = 'none';
+          }
+        }
 
         const methodEl = $('#iMethod');
         const audioEl = $('#iAudio');
