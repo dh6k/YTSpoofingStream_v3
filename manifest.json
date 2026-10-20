@@ -79,7 +79,8 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "locales/*.json"
+        "locales/*.json",
+        "src/inject.js"
       ],
       "matches": [
         "*://*.youtube.com/*"
