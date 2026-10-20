@@ -1994,9 +1994,14 @@
       return this.prefetchSeek(sec, { protectPlayback: true });
     },
 
-    onSeek(targetSec) {
+    onSeek(targetSec, opts = {}) {
       const session = this.session;
       if (!session || session.aborted || !this.isActive || !session.sourceBuffer) return;
+      // Lever 3: the post-seek audio align window is only armed for real user/seek-path
+      // dispatches. Attach/loadedmetadata, reconnect and >1.5s watchdog snaps do not need
+      // it (their alignment is handled by the `updateend` initial sync), and arming it
+      // there produced a one-off hard audio seek for a <300ms drift during straight play.
+      const userSeek = opts.userSeek !== false;
       const strictCov = this.getStrictBufferedRange(session.sourceBuffer, targetSec);
       if (strictCov === null) {
         // Dedupe (lever 1): one user seek is dispatched twice when prefetch-on-`seeking` is
@@ -2007,8 +2012,10 @@
         if (typeof pendingTarget === 'number' &&
             Math.abs(pendingTarget - targetSec) <= 0.35 &&
             (session.inFlight || session.appendQueue.length > 0)) {
-          session.seekAudioResyncUntil = Date.now() + 4000;
-          this.scheduleAudioResync(session);
+          if (userSeek) {
+            session.seekAudioResyncUntil = Date.now() + 4000;
+            this.scheduleAudioResync(session);
+          }
           return;
         }
         // Target seek time is outside strict MSE buffer -> supersede any in-flight fetch and pump immediately!
@@ -2034,9 +2041,11 @@
         session.inFlight = false;
         session.inFlightOwner = null;
         // The native video keeps playing during the SABR round-trip; remember to align the slave
-        // audio forward to it once the requested cluster has been buffered.
-        session.seekAudioResyncUntil = Date.now() + 4000;
-        this.scheduleAudioResync(session);
+        // audio forward to it once the requested cluster has been buffered (user seeks only).
+        if (userSeek) {
+          session.seekAudioResyncUntil = Date.now() + 4000;
+          this.scheduleAudioResync(session);
+        }
         this.pump(session);
       } else {
         session.seekTargetSec = null;
@@ -2320,6 +2329,11 @@
     _initialMetaSynced: false,
     _waiterTimer: null,
     _watchdogTimer: null,
+    // Lever 3 (A-refine-playback): bounded micro playbackRate convergence for
+    // 80ms < |audio-video drift| < 300ms. Only the slave <audio> rate is touched;
+    // video.currentTime is never written by this path.
+    _rateCorrection: 1.0,
+    _rateCorrectionUntil: 0,
     _inSyncVol: false,
     _globalEventsHooked: false,
     _hookedVideos: new WeakSet(),
@@ -2558,11 +2572,11 @@
               try {
                 this.audio.currentTime = vTime;
                 if (UmpMseController774.isActive) {
-                  UmpMseController774.onSeek(vTime);
+                  UmpMseController774.onSeek(vTime, { userSeek: false });
                 }
               } catch (e) {}
             }
-            this.audio.playbackRate = video.playbackRate || 1.0;
+            this.applyAudioRate(video);
           }
         });
 
@@ -3212,10 +3226,10 @@
               this._lastSeekTime = Date.now();
               this.audio.currentTime = vTargetSec;
               if (UmpMseController774.isActive) {
-                UmpMseController774.onSeek(vTargetSec);
+                UmpMseController774.onSeek(vTargetSec, { userSeek: true });
               }
             }
-            this.audio.playbackRate = video.playbackRate;
+            this.applyAudioRate(video);
             if (!video.paused && !this._userPaused && this.audio.paused) {
               this._tryPlayAudio();
             }
@@ -3226,7 +3240,7 @@
         // 2. Rate & Volume Changes — Process BEFORE document.hidden check
         if (e.type === 'ratechange') {
           if (!this._isInternalVideoSync) {
-            this.audio.playbackRate = video.playbackRate;
+            this.applyAudioRate(video);
           }
           return;
         }
@@ -3266,7 +3280,7 @@
           if ((e.type === 'play' || e.type === 'playing') && !this.isAdActive()) {
             this._silenceElement(video);
             this.syncVol(video);
-            this.audio.playbackRate = video.playbackRate;
+            this.applyAudioRate(video);
             if (this.audio.paused) {
               const vTargetSec = getVideoTimeFor(this.activeVideoId);
               if (Math.abs(this.audio.currentTime - vTargetSec) > 1.0) {
@@ -3345,7 +3359,7 @@
           }
           this._silenceElement(video);
           this.syncVol(video);
-          this.audio.playbackRate = video.playbackRate;
+          this.applyAudioRate(video);
 
           if (this.audio.paused) {
             const vTargetSec = getVideoTimeFor(this.activeVideoId);
@@ -3354,7 +3368,7 @@
             if (diff > 0.6) {
               this.audio.currentTime = vTargetSec;
             }
-            this.audio.playbackRate = video.playbackRate || 1.0;
+            this.applyAudioRate(video);
             if (!this._userPaused) {
               this.audio.play().catch((err) => {
                 if (err && err.name === 'NotAllowedError') {
@@ -4119,7 +4133,7 @@
 
       this._silenceElement(video);
       this.syncVol(video);
-      this.audio.playbackRate = video.playbackRate;
+      this.applyAudioRate(video);
 
       // Audio playing in background must NEVER stutter or seek on tab switch!
       if (!this.audio.paused && !this.audio.ended) {
@@ -4196,7 +4210,7 @@
       const video = getMainVideoElement();
       const targetTime = (this.audio && this.audio.currentTime > 0) ? this.audio.currentTime : (video ? getVideoTimeFor(this.activeVideoId) : 0);
       if (this.best774Candidate._isUmpMse && UmpMseController774.isActive) {
-        UmpMseController774.onSeek(targetTime);
+        UmpMseController774.onSeek(targetTime, { userSeek: false });
         return;
       }
       const rawUrl = this.best774Candidate.url || this.best774Candidate._directUrl;
@@ -4232,7 +4246,7 @@
         try { this.audio.currentTime = targetTime; } catch (e) {}
       }
       if (video) {
-        this.audio.playbackRate = video.playbackRate;
+        this.applyAudioRate(video);
         this.syncVol(video);
         if (!video.paused && !this.isAdActive()) {
           this._tryPlayAudio();
@@ -4254,6 +4268,48 @@
         clearInterval(this._watchdogTimer);
         this._watchdogTimer = null;
       }
+    },
+
+    // Desired playbackRate for the slave <audio>: the master (video/user) rate times the
+    // bounded micro-correction. Always RELATIVE to video.playbackRate so an explicit user
+    // speed change (0.5x..2x) is respected, never overwritten with 1.0.
+    desiredAudioRate(userRate) {
+      const base = (typeof userRate === 'number' && isFinite(userRate) && userRate > 0) ? userRate : 1.0;
+      const active = Date.now() < (this._rateCorrectionUntil || 0);
+      return base * (active ? (this._rateCorrection || 1.0) : 1.0);
+    },
+
+    applyAudioRate(video) {
+      if (!this.audio) return 1.0;
+      const userRate = video ? video.playbackRate : (this.audio.playbackRate || 1.0);
+      const wanted = this.desiredAudioRate(userRate);
+      if (Math.abs((this.audio.playbackRate || 1.0) - wanted) > 0.0005) {
+        try { this.audio.playbackRate = wanted; } catch (e) {}
+      }
+      return wanted;
+    },
+
+    // Lever 3: converge sub-300ms drift with a small (+/-2..5%) audio playbackRate offset
+    // instead of hard-seeking the audio. Restores 1.0 (relative to video.playbackRate) as
+    // soon as the drift is inside the 80ms deadband. The 300ms ceiling keeps the existing
+    // hard paths (>300ms: watchdog snap; post-seek align) in charge of large corrections.
+    updateAudioRateCorrection(video, vTime, aTime) {
+      const now = Date.now();
+      const drift = aTime - vTime;              // >0: audio ahead of the master clock
+      const absMs = Math.abs(drift) * 1000;
+      const canCorrect = this.isActive && video && !video.paused && !this._userPaused &&
+        !this._isSeeking && !video.seeking && this.audio && !this.audio.seeking &&
+        !this._isAudioBuffering && !this._trackEnded && !document.hidden &&
+        !this.isAdActive() && (now - (this._lastSeekTime || 0) > 3000);
+      if (!canCorrect || absMs < 80 || absMs > 300) {
+        this._rateCorrection = 1.0;
+        this._rateCorrectionUntil = 0;
+        return;
+      }
+      // Close the observed gap in ~2-3s; clamp the offset to 2-5%.
+      const mag = Math.min(0.05, Math.max(0.02, absMs / 2500));
+      this._rateCorrection = drift > 0 ? (1 - mag) : (1 + mag);
+      this._rateCorrectionUntil = now + 1200;
     },
 
     checkSyncWatchdog() {
@@ -4523,11 +4579,10 @@
         }
       }
 
-      // 3. Keep playbackRate strictly 1:1 with video at all times.
-      const userRate = video.playbackRate || 1.0;
-      if (this.audio.playbackRate !== userRate) {
-        this.audio.playbackRate = userRate;
-      }
+      // 3. playbackRate = video.playbackRate (master) plus the bounded micro-correction
+      // that converges sub-300ms drift without seeking the audio (lever 3).
+      this.updateAudioRateCorrection(video, vTime, aTime);
+      this.applyAudioRate(video);
 
       // 4. MASTER CLOCK CONTINUITY & SEEK RESILIENCE:
       const drift = aTime - vTime;
@@ -4540,7 +4595,7 @@
         this._lastSeekTime = now;
         this.audio.currentTime = vTime;
         if (UmpMseController774.isActive) {
-          UmpMseController774.onSeek(vTime);
+          UmpMseController774.onSeek(vTime, { userSeek: false });
         }
         return;
       }
@@ -4648,7 +4703,7 @@
           this.audio.currentTime = startSec;
         } catch (e) {}
       }
-      this.audio.playbackRate = mainVideo.playbackRate || 1.0;
+      this.applyAudioRate(mainVideo);
 
       this.syncVol(mainVideo);
 
@@ -4741,6 +4796,8 @@
     },
 
     stopAndUnmute(reason = '', preserveVideoId = null) {
+      this._rateCorrection = 1.0;
+      this._rateCorrectionUntil = 0;
       const vId = preserveVideoId || this.activeVideoId || getVideoIdFromUrl();
       if (vId && (reason.toLowerCase().includes('no 774') || reason.toLowerCase().includes('not supported'))) {
         confirmedNo774Videos.add(vId);
