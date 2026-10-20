@@ -17,3 +17,5 @@ key.pem
 Vorapis_latest.user.js
 smoke_test.js
 firefox_smoke_test.js
+tmp/
+*.log

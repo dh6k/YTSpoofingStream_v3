@@ -46,7 +46,9 @@
     const host = ensureHost();
     const iframe = document.createElement('iframe');
     iframe.id = 'harvesterFrame';
-    iframe.setAttribute('allow', 'autoplay');
+    if (!navigator.userAgent.includes('Firefox')) {
+      iframe.setAttribute('allow', 'autoplay');
+    }
     iframe.style.cssText = 'position:absolute; top:-9999px; left:-9999px; width:640px; height:360px; border:none;';
     host.appendChild(iframe);
     return iframe;

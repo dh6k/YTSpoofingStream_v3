@@ -610,10 +610,24 @@
     if (confirmedNo774Videos.has(videoId)) {
       return { formats: [], streamingContext: null };
     }
+    if (S.operationMode === OP_MODES.HYBRID_HQ && !opts.excludeSource && !opts.preferredSource && !opts.forceFresh) {
+      const failedSet = failedSourcesPerVideo.get(videoId);
+      if (failedSet && failedSet.size > 0) {
+        if (failedSet.has('TVHTML5') && failedSet.has('YTM_HARVESTER')) {
+          return { formats: [], streamingContext: null };
+        }
+        if (failedSet.has('TVHTML5')) {
+          opts = { ...opts, preferredSource: 'YTM_HARVESTER', excludeSource: 'TVHTML5' };
+        } else if (failedSet.has('YTM_HARVESTER')) {
+          opts = { ...opts, preferredSource: 'TVHTML5', excludeSource: 'YTM_HARVESTER' };
+        }
+      }
+    }
     const hasFailoverOpts = !!(opts.excludeSource || opts.preferredSource);
+    if (!opts.forceFresh && pendingFetches.has(videoId)) {
+      return await pendingFetches.get(videoId);
+    }
     if (!hasFailoverOpts && !opts.forceFresh) {
-      if (pendingFetches.has(videoId)) return await pendingFetches.get(videoId);
-
       const cached = cacheGet(videoId);
       if (cached && (cached.formats?.length > 0 || cached.streamingContext)) return cached;
 
@@ -737,9 +751,7 @@
       return { formats: has774 ? only774 : merged, streamingContext: tvCtx };
     });
 
-    if (!hasFailoverOpts) {
-      pendingFetches.set(videoId, fetchPromise);
-    }
+    pendingFetches.set(videoId, fetchPromise);
     return await fetchPromise;
   }
 
@@ -1267,42 +1279,160 @@
     isActive: false,
     videoId: null,
 
+    _extractOrigN(rawUrl) {
+      if (!rawUrl || typeof rawUrl !== 'string') return null;
+      try {
+        const qn = new URL(rawUrl).searchParams.get('n');
+        if (qn) return qn;
+      } catch (e) {}
+      const pm = rawUrl.match(/\/n\/([^/?&]+)/);
+      return pm ? pm[1] : null;
+    },
+
+    _applyDecipheredN(rawUrl, origN, newN) {
+      if (typeof newN !== 'string' || !newN || newN.includes('__DECODE_N_') || (origN && newN === origN)) {
+        return null;
+      }
+      if (origN) {
+        if (rawUrl.includes(`&n=${origN}`)) return rawUrl.replace(`&n=${origN}`, `&n=${newN}`);
+        if (rawUrl.includes(`?n=${origN}`)) return rawUrl.replace(`?n=${origN}`, `?n=${newN}`);
+        if (rawUrl.includes(`/n/${origN}`)) return rawUrl.replace(`/n/${origN}`, `/n/${newN}`);
+      }
+      try {
+        const u = new URL(rawUrl);
+        if (u.searchParams.has('n')) {
+          u.searchParams.set('n', newN);
+          return u.toString();
+        }
+      } catch (e) {}
+      return null;
+    },
+
+    _decipherViaInstance(inst, rawUrl, origN) {
+      if (!inst || typeof inst !== 'object') return null;
+      let getN = null;
+      if (typeof inst.get === 'function') {
+        try {
+          const v = inst.get('n');
+          if (typeof v === 'string' && v && (!origN || v !== origN)) {
+            getN = v;
+          }
+        } catch (e) {}
+      }
+      if (typeof inst.kZ === 'function') {
+        try {
+          const v = inst.kZ();
+          if (typeof v === 'string' && v.startsWith('https://')) {
+            const newN = this._extractOrigN(v);
+            if (!origN || (newN && newN !== origN)) return v;
+          }
+        } catch (e) {}
+      }
+      const proto = Object.getPrototypeOf(inst);
+      if (proto && proto !== Object.prototype) {
+        for (const k of Object.getOwnPropertyNames(proto)) {
+          if (k !== 'constructor' && k !== 'clone' && typeof inst[k] === 'function' && inst[k].length === 0) {
+            try {
+              const v = inst[k]();
+              if (typeof v === 'string' && v.startsWith('https://')) {
+                const newN = this._extractOrigN(v);
+                if (!origN || (newN && newN !== origN)) {
+                  return v;
+                }
+              }
+            } catch (e) {}
+          }
+        }
+      }
+      if (getN) {
+        return this._applyDecipheredN(rawUrl, origN, getN);
+      }
+      return null;
+    },
+
+    _isDecoderReady() {
+      const bak = window.bakend;
+      if (bak?.abo_func && (typeof bak.abo_func.n_class === 'function' || typeof bak.abo_func.n_direct_ptr === 'function' || typeof bak.abo_func.n === 'function')) {
+        return true;
+      }
+      if (window._yt_player && Object.keys(window._yt_player).length >= 50) {
+        return true;
+      }
+      return false;
+    },
+
     decipherSabrUrl(rawUrl) {
-      if (!rawUrl || typeof rawUrl !== 'string') return rawUrl;
+      if (!rawUrl || typeof rawUrl !== 'string') return null;
+      const origN = this._extractOrigN(rawUrl);
+      if (!origN) return rawUrl;
+
+      // 1. Vorapis V3 decipher pipeline (window.bakend)
+      try {
+        const bak = window.bakend;
+        if (bak) {
+          const cachedN = bak.nsFactory?.ncache?.[origN];
+          if (typeof cachedN === 'string' && cachedN && cachedN !== origN) {
+            const applied = this._applyDecipheredN(rawUrl, origN, cachedN);
+            if (applied) return applied;
+          }
+          if (typeof bak.abo_func?.n_class === 'function') {
+            const inst = bak.abo_func.n_class(rawUrl);
+            const resolved = this._decipherViaInstance(inst, rawUrl, origN);
+            if (resolved) {
+              const decN = this._extractOrigN(resolved);
+              if (decN && bak.nsFactory?.ncache) bak.nsFactory.ncache[origN] = decN;
+              return resolved;
+            }
+          }
+          if (typeof bak.abo_func?.n_direct_ptr === 'function') {
+            const newN = bak.abo_func.n_direct_ptr(origN);
+            const applied = this._applyDecipheredN(rawUrl, origN, newN);
+            if (applied) {
+              if (bak.nsFactory?.ncache) bak.nsFactory.ncache[origN] = newN;
+              return applied;
+            }
+          }
+          if (typeof bak.abo_func?.n === 'function') {
+            let newN = null;
+            if (bak.abo_func_new?.n) {
+              const params = (bak.abo_func_new.n.params || []).slice();
+              if (bak.abo_func_new.n.param_index !== undefined) {
+                params[bak.abo_func_new.n.param_index] = origN;
+              } else {
+                params.push(origN);
+              }
+              newN = bak.abo_func.n.apply(null, params);
+            } else {
+              newN = bak.abo_func.n(origN);
+            }
+            const applied = this._applyDecipheredN(rawUrl, origN, newN);
+            if (applied) {
+              if (bak.nsFactory?.ncache) bak.nsFactory.ncache[origN] = newN;
+              return applied;
+            }
+          }
+        }
+      } catch (e) {
+        console.log(TAG, '[UmpMse774] Vorapis decipherSabrUrl error:', e);
+      }
+
+      // 2. Standard YouTube decipher pipeline (window._yt_player)
       try {
         const ytp = window._yt_player;
         if (!ytp) return null;
         if (typeof ytp.NT === 'function') {
           const inst = new ytp.NT(rawUrl, true);
-          if (typeof inst.kZ === 'function') {
-            const v = inst.kZ();
-            if (typeof v === 'string' && v.startsWith('https://')) return v;
-          }
-          for (const k of Object.getOwnPropertyNames(ytp.NT.prototype || {})) {
-            if (k !== 'constructor' && typeof inst[k] === 'function' && inst[k].length === 0) {
-              try {
-                const v = inst[k]();
-                if (typeof v === 'string' && v.startsWith('https://')) return v;
-              } catch (e) {}
-            }
-          }
+          const resolved = this._decipherViaInstance(inst, rawUrl, origN);
+          if (resolved) return resolved;
         }
-        const origN = new URL(rawUrl).searchParams.get('n');
         for (const [, fn] of Object.entries(ytp)) {
           if (typeof fn === 'function' && fn.prototype && typeof fn.prototype.set === 'function' && typeof fn.prototype.get === 'function') {
             try {
               const inst = new fn(rawUrl, true);
-              for (const mk of Object.getOwnPropertyNames(fn.prototype)) {
-                if (mk !== 'constructor' && typeof inst[mk] === 'function' && inst[mk].length === 0) {
-                  const v = inst[mk]();
-                  if (typeof v === 'string' && v.startsWith('https://')) {
-                    const newN = new URL(v).searchParams.get('n');
-                    if (!origN || (newN && newN !== origN)) {
-                      ytp.NT = fn;
-                      return v;
-                    }
-                  }
-                }
+              const resolved = this._decipherViaInstance(inst, rawUrl, origN);
+              if (resolved) {
+                ytp.NT = fn;
+                return resolved;
               }
             } catch (e) {}
           }
@@ -1310,19 +1440,64 @@
       } catch (e) {
         console.log(TAG, '[UmpMse774] decipherSabrUrl error:', e);
       }
-      return rawUrl;
+      return null;
     },
 
     async ensureDecipheredUrl(session) {
       if (session.decipheredUrl) return session.decipheredUrl;
+      const rawUrl = session.tvCtx?.serverAbrStreamingUrl;
+      if (!rawUrl) return null;
+      const origN = this._extractOrigN(rawUrl);
+      if (!origN) {
+        session.decipheredUrl = rawUrl;
+        return rawUrl;
+      }
+
+      let dec = this.decipherSabrUrl(rawUrl);
+      if (dec) {
+        session.decipheredUrl = dec;
+        return dec;
+      }
+
       const startWait = Date.now();
-      while ((!window._yt_player || Object.keys(window._yt_player).length < 50) && Date.now() - startWait < 3500) {
+      while (
+        !this._isDecoderReady() &&
+        typeof window.bakend?.nsFactory?.assure_stream_async !== 'function' &&
+        Date.now() - startWait < 4500
+      ) {
         if (session.aborted) return null;
         await new Promise(r => setTimeout(r, 30));
       }
       if (session.aborted) return null;
-      session.decipheredUrl = this.decipherSabrUrl(session.tvCtx.serverAbrStreamingUrl) || session.tvCtx.serverAbrStreamingUrl;
-      return session.decipheredUrl;
+
+      dec = this.decipherSabrUrl(rawUrl);
+      if (!dec && typeof window.bakend?.nsFactory?.assure_stream_async === 'function') {
+        try {
+          const wrappedUrl = rawUrl.includes(`&n=${origN}`)
+            ? rawUrl.replace(`&n=${origN}`, `&n=__DECODE_N_${origN}_DECODED_N__`)
+            : rawUrl.replace(`?n=${origN}`, `?n=__DECODE_N_${origN}_DECODED_N__`).replace(`/n/${origN}`, `/n/__DECODE_N_${origN}_DECODED_N__`);
+          const assured = await Promise.race([
+            window.bakend.nsFactory.assure_stream_async(wrappedUrl),
+            new Promise(r => setTimeout(() => r(null), 4000))
+          ]);
+          if (session.aborted) return null;
+          if (typeof assured === 'string' && assured.startsWith('https://') && !assured.includes('__DECODE_N_')) {
+            const newN = this._extractOrigN(assured);
+            if (newN && newN !== origN) {
+              dec = assured;
+            }
+          }
+          if (!dec) {
+            dec = this.decipherSabrUrl(rawUrl);
+          }
+        } catch (e) {}
+      }
+
+      if (dec) {
+        session.decipheredUrl = dec;
+        return dec;
+      }
+      return rawUrl;
     },
 
     buildAbrRequestBytes(session, playerTimeMs) {
@@ -4738,7 +4913,19 @@
       const cfg = window.ytcfg;
       if (!cfg || typeof cfg.get !== 'function') return null;
 
-      const rawSts = cfg.get('STS') || (window.ytplayer && window.ytplayer.config && window.ytplayer.config.sts);
+      let v3Sts = null;
+      try {
+        const v3CacheRaw = window.localStorage?.getItem('v3_abofactory_cache');
+        if (v3CacheRaw) {
+          const v3Cache = JSON.parse(v3CacheRaw);
+          const firstEntry = v3Cache && typeof v3Cache === 'object' ? Object.values(v3Cache)[0] : null;
+          if (firstEntry && Number(firstEntry.sig) > 0) {
+            v3Sts = Number(firstEntry.sig);
+          }
+        }
+      } catch (e) {}
+
+      const rawSts = cfg.get('STS') || (window.ytplayer && window.ytplayer.config && window.ytplayer.config.sts) || v3Sts;
       if (rawSts) {
         try { window.sessionStorage.setItem('ytss_sts', String(rawSts)); } catch (e) { }
       }
@@ -4749,8 +4936,13 @@
         visitorData: cfg.get('VISITOR_DATA') || innertube?.client?.visitorData || null,
         sessionIndex: cfg.get('SESSION_INDEX') ?? null,
         delegatedSessionId: cfg.get('DELEGATED_SESSION_ID') || null,
-        sts: rawSts || cachedSts || 20696,
-        poToken: cfg.get('POTOKEN') || (window.ytplayer && window.ytplayer.config && window.ytplayer.config.args && window.ytplayer.config.args.raw_player_response && window.ytplayer.config.args.raw_player_response.serviceTrackingParams && window.ytplayer.config.args.raw_player_response.serviceTrackingParams.find(x => x.service === 'CSI')?.params?.find(x => x.key === 'potoken')?.value) || null,
+        sts: rawSts || cachedSts || 20744,
+        poToken: cfg.get('POTOKEN')
+          || (window.ytplayer && window.ytplayer.config && window.ytplayer.config.args && window.ytplayer.config.args.raw_player_response && window.ytplayer.config.args.raw_player_response.serviceTrackingParams && window.ytplayer.config.args.raw_player_response.serviceTrackingParams.find(x => x.service === 'CSI')?.params?.find(x => x.key === 'potoken')?.value)
+          || window.bakend?.poToken
+          || window.localStorage?.getItem('npt_new')
+          || window.localStorage?.getItem('npt')
+          || null,
         gl: cfg.get('GL') || innertube?.client?.gl || 'VN',
         hl: cfg.get('HL') || innertube?.client?.hl || 'vi',
       };
@@ -4913,7 +5105,11 @@
     if (playableCandidates.length > 0 && S.operationMode !== OP_MODES.TV_HEADLESS && S.operationMode !== OP_MODES.TV_RELAY) {
       console.log(TAG, `[${source}] Upgrading ${videoId} to Studio HQ 774`);
       StudioEngine774.load774(videoId, playableCandidates[0]);
-    } else if (real774Candidates.length > 0 && sabrRewrite.downgradedVideoId !== videoId) {
+    } else if (
+      real774Candidates.length > 0 &&
+      sabrRewrite.downgradedVideoId !== videoId &&
+      !(S.operationMode === OP_MODES.HYBRID_HQ && failedSourcesPerVideo.get(videoId)?.has('TVHTML5'))
+    ) {
       if (S.operationMode === OP_MODES.TV_RELAY) {
         if (!sabrRewrite.on || sabrRewrite.videoId !== videoId) {
           console.log(TAG, `[${source}] Activating Legacy TV SABR 774 for ${videoId}`);
