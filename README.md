@@ -245,16 +245,20 @@ CI: push tag `v0.2.6.2` (or run **Package CRX** workflow). Store `key.pem` as re
 ### Mozilla Firefox (v128.0+)
 Build the `.xpi` package first using `./tools/pack-firefox.sh` (which stages `manifest.firefox.json` as `manifest.json` and outputs `dist-out/ytspoofingstream-vorapis-<ver>.xpi`).
 
-1. **Temporary Install (Development / Testing)**:
+1. **Temporary Install (Development / Testing — works on all builds including Stable)**:
    - Open `about:debugging#/runtime/this-firefox` in Firefox.
    - Click **Load Temporary Add-on...** and select the built `.xpi` file in `dist-out/` (or stage a directory with `manifest.firefox.json` copied to `manifest.json` and select `manifest.json`).
-   - *Note*: Temporary add-ons remain active until Firefox is closed.
-2. **Permanent Install**:
-   - **Firefox Release / Stable**: Standard Firefox stable builds block unsigned `.xpi` packages (`xpinstall.signatures.required` is enforced). To install permanently on Firefox Stable, sign the package through AMO (self-distributed/unlisted) using `web-ext sign`:
+   - *Note*: Temporary add-ons are removed when you close the browser.
+2. **Permanent Install on Firefox Stable Release**:
+   - Standard **Firefox Stable / Release** strictly enforces extension signatures and **ignores** `xpinstall.signatures.required = false`.
+   - To install permanently on Firefox Stable, sign the package via AMO as an **unlisted** (self-distributed) add-on using `web-ext sign` (requires an AMO API key):
      ```bash
      npx web-ext sign --channel=unlisted --api-key="$AMO_JWT_ISSUER" --api-secret="$AMO_JWT_SECRET"
      ```
-   - **Firefox Developer Edition / Nightly / ESR**: Open `about:config`, set `xpinstall.signatures.required` to `false`, then drag-and-drop `dist-out/ytspoofingstream-vorapis-<ver>.xpi` into `about:addons` (or select **Install Add-on From File...**).
+   - Otherwise, on Firefox Stable you must load it temporarily via `about:debugging` (lost when the browser closes).
+3. **Permanent Install via `about:config` (Firefox ESR / Developer Edition / Nightly / Unbranded ONLY)**:
+   - Setting `xpinstall.signatures.required = false` in `about:config` **ONLY** works on **Firefox ESR, Developer Edition, Nightly, or unbranded builds** — it **does NOT work** on Firefox Stable Release.
+   - On those supported builds, set `xpinstall.signatures.required` to `false` in `about:config`, then drag-and-drop `dist-out/ytspoofingstream-vorapis-<ver>.xpi` into `about:addons` (or choose **Install Add-on From File...**).
 
 ---
 

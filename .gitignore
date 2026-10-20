@@ -11,6 +11,9 @@ prompt.txt
 execution/
 base.js
 dist/
+dist-firefox/
 dist-out/
 key.pem
 Vorapis_latest.user.js
+smoke_test.js
+firefox_smoke_test.js
