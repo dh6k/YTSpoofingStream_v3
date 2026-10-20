@@ -1,6 +1,6 @@
 // ╔══════════════════════════════════════════════════════════════════╗
-// ║  YTSpoofingStream — Offscreen Harvester (Mode 1 & Mode 4)        ║
-// ║  Harvests direct HQ formats from YTM and UMP chunks from TV      ║
+// ║  YTSpoofingStream — Offscreen Harvester                          ║
+// ║  Harvests direct authentic Studio Opus 774 formats via YTM       ║
 // ╚══════════════════════════════════════════════════════════════════╝
 
 const TAG = '[YTSpoofHarvester]';
@@ -54,6 +54,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 window.addEventListener('message', (e) => {
+  // Only trust messages from our own harvester iframe running music.youtube.com.
+  const frame = document.getElementById('harvesterFrame');
+  if (e.origin !== 'https://music.youtube.com' || !frame || e.source !== frame.contentWindow) return;
+
   if (e.data?.type === 'HARVEST_774_URL') {
     console.log(TAG, `Iframe captured authentic 774 stream for ${e.data.videoId}`);
     teardownFrame();

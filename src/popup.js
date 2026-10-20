@@ -1,4 +1,4 @@
-// ytsSpoofingstream (vorapis edition) v0.2.6.2 — Popup Controller
+// ytsSpoofingstream (vorapis edition) v0.2.6.3 — Popup Controller
 (function () {
   'use strict';
 
@@ -62,8 +62,21 @@
     pollStatus();
   }
 
+  const SUPPORTED_LANGS = ['en', 'vi', 'ja', 'ru', 'zh-cn', 'zh-tw'];
+
+  function detectBrowserLang() {
+    const sysLang = (navigator.language || '').toLowerCase();
+    if (sysLang.startsWith('vi')) return 'vi';
+    if (sysLang.startsWith('ja')) return 'ja';
+    if (sysLang.startsWith('ru')) return 'ru';
+    if (sysLang === 'zh-tw' || sysLang === 'zh-hk' || sysLang === 'zh-mo' || sysLang.includes('hant')) return 'zh-tw';
+    if (sysLang.startsWith('zh')) return 'zh-cn';
+    return 'en';
+  }
+
   async function setLanguage(lang) {
-    if (!['en', 'vi'].includes(lang)) lang = 'en';
+    const normalized = String(lang || '').toLowerCase();
+    lang = SUPPORTED_LANGS.includes(normalized) ? normalized : 'en';
     currentLang = lang;
     currentLocaleData = await loadLocale(lang);
     chrome.storage.local.set({ uiLanguage: lang });
@@ -75,8 +88,7 @@
     chrome.storage.local.get(['uiLanguage'], async (res) => {
       let lang = res?.uiLanguage;
       if (!lang) {
-        const sysLang = (navigator.language || '').toLowerCase();
-        lang = sysLang.startsWith('vi') ? 'vi' : 'en';
+        lang = detectBrowserLang();
       }
       await setLanguage(lang);
     });
@@ -92,6 +104,7 @@
   const KEYS = {
     enabled: '#en',
     audioOnly: '#ao',
+    volumeBalance: '#vb',
     autoReload: '#ar',
     shadowPlayer: '#sp',
   };
@@ -99,6 +112,7 @@
   let settings = {
     enabled: true,
     audioOnly: false,
+    volumeBalance: true,
     autoReload: true,
     operationMode: 'HYBRID_HQ',
     shadowPlayer: true,
@@ -119,6 +133,28 @@
     return out;
   }
 
+  // Same scope as the inject.js/bridge.js content scripts: youtube.com, minus YTM.
+  // The popup acts on whatever tab is active, so without this check it would read
+  // and write localStorage on any site the user happens to have open.
+  function isYouTubeTab(tab) {
+    try {
+      const u = new URL(tab?.url || '');
+      return u.protocol === 'https:'
+        && (u.hostname === 'youtube.com' || u.hostname.endsWith('.youtube.com'))
+        && u.hostname !== 'music.youtube.com';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function execInYouTubeTab(tab, opts, callback) {
+    if (!isYouTubeTab(tab)) {
+      if (callback) callback(undefined);
+      return;
+    }
+    chrome.scripting.executeScript({ target: { tabId: tab.id }, ...opts }, callback);
+  }
+
   // Load from chrome.storage
   chrome.storage.local.get(SETTING_KEYS, (data) => {
     if (data && Object.keys(data).length > 0) {
@@ -126,6 +162,9 @@
       if (settings.operationMode === 'SAFE_NATIVE') {
         settings.operationMode = 'HYBRID_HQ';
         chrome.storage.local.set({ operationMode: 'HYBRID_HQ' });
+      } else if (settings.operationMode === 'TV_UMP_MSE') {
+        settings.operationMode = 'TV_HEADLESS';
+        chrome.storage.local.set({ operationMode: 'TV_HEADLESS' });
       }
     } else {
       loadLegacy();
@@ -137,8 +176,7 @@
   function loadLegacy() {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
-      chrome.scripting.executeScript({
-        target: { tabId: tabs[0].id },
+      execInYouTubeTab(tabs[0], {
         func: () => localStorage.getItem('ytss_settings'),
       }, (results) => {
         if (results?.[0]?.result) {
@@ -146,6 +184,8 @@
             Object.assign(settings, pickSettings(JSON.parse(results[0].result)));
             if (settings.operationMode === 'SAFE_NATIVE') {
               settings.operationMode = 'HYBRID_HQ';
+            } else if (settings.operationMode === 'TV_UMP_MSE') {
+              settings.operationMode = 'TV_HEADLESS';
             }
             chrome.storage.local.set(settings);
             applyUI();
@@ -161,6 +201,7 @@
       if (el) el.checked = !!settings[key];
     }
 
+    if (settings.operationMode === 'TV_UMP_MSE') settings.operationMode = 'TV_HEADLESS';
     const activeOpMode = (settings.operationMode === 'SAFE_NATIVE' || !settings.operationMode) ? 'HYBRID_HQ' : settings.operationMode;
     document.querySelectorAll('.op-mode').forEach(m => {
       const isActive = m.dataset.opmode === activeOpMode;
@@ -182,31 +223,53 @@
         stBadge.style.background = 'rgba(120, 120, 120, 0.2)';
         stBadge.style.color = '#aaa';
       }
+    } else if (stBadge) {
+      stBadge.style.background = '';
+      stBadge.style.color = '';
     }
   }
+
+  let pendingSelfSaves = 0;
+
+  // Keep popup UI in sync when settings (e.g. audioOnly via in-player HUD) change externally while popup is open
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes || pendingSelfSaves > 0) return;
+    let updated = false;
+    for (const key of SETTING_KEYS) {
+      if (changes[key] && changes[key].newValue !== undefined && settings[key] !== changes[key].newValue) {
+        settings[key] = changes[key].newValue;
+        updated = true;
+      }
+    }
+    if (updated) {
+      applyUI();
+    }
+  });
 
   function save(e) {
     if ($('#en')) settings.enabled = $('#en').checked;
     if ($('#ao')) settings.audioOnly = $('#ao').checked;
+    if ($('#vb')) settings.volumeBalance = $('#vb').checked;
     if ($('#ar')) settings.autoReload = $('#ar').checked;
     if ($('#sp')) settings.shadowPlayer = $('#sp').checked;
 
-    const isAoOnly = Boolean(e && e.target && e.target.id === 'ao');
+    const isLiveToggle = Boolean(e && e.target && (e.target.id === 'ao' || e.target.id === 'vb'));
 
     applyUI();
-    chrome.storage.local.set(settings);
-    log(`Settings saved. OpMode: ${settings.operationMode}, AudioOnly: ${settings.audioOnly}, StatsOverride: ${settings.shadowPlayer}`);
+    pendingSelfSaves++;
+    chrome.storage.local.set(settings, () => {
+      pendingSelfSaves = Math.max(0, pendingSelfSaves - 1);
+    });
+    log(`Settings saved. OpMode: ${settings.operationMode}, AudioOnly: ${settings.audioOnly}, VolBalance: ${settings.volumeBalance}, StatsOverride: ${settings.shadowPlayer}`);
 
-    // Note: YouTube page must refresh after applying config (except for audioOnly live toggle)
+    // Note: YouTube page must refresh after applying config (except for audioOnly and volumeBalance live toggles)
     // Send settings to content script and trigger reload if necessary
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
-      const tabId = tabs[0].id;
 
       // Send settings to content script (inject.js) via messaging
-      chrome.scripting.executeScript({
-        target: { tabId },
-        func: (s, isAo) => {
+      execInYouTubeTab(tabs[0], {
+        func: (s, isLive) => {
           localStorage.setItem('ytss_settings', JSON.stringify(s));
           localStorage.setItem('ytSpoofingStream_settings', JSON.stringify(s));
           if (window.YTSS_SpoofingMethods && typeof window.YTSS_SpoofingMethods.applySettings === 'function') {
@@ -214,18 +277,18 @@
           } else {
             window.postMessage({ type: 'YTSpoofingStream_settingsUpdate', settings: s }, '*');
           }
-          if (isAo) {
+          if (s.audioOnly !== undefined) {
             window.postMessage({ type: 'YTSS_SET_AUDIO_ONLY', audioOnly: s.audioOnly }, '*');
           }
 
-          // Force reload YouTube page to apply new config (skip reload for audioOnly toggle)
-          if (!isAo && s.autoReload && window.location.href.includes('youtube.com')) {
+          // Force reload YouTube page to apply new config (skip reload for live toggles)
+          if (!isLive && s.autoReload && window.location.href.includes('youtube.com')) {
             window.location.reload();
           }
         },
-        args: [settings, isAoOnly],
+        args: [settings, isLiveToggle],
       }, () => {
-        if (!isAoOnly && settings.autoReload && /youtube\.com/.test(tabs[0].url || '')) {
+        if (!isLiveToggle && settings.autoReload && isYouTubeTab(tabs[0])) {
           log('Config applied — reloading YouTube page...');
         }
       });
@@ -235,6 +298,14 @@
   // ─── CLIENT OAUTH HANDLERS ─────────────────────────────────────────
   function setupAuthControl(clientKey, statusElId, codeContId, codeElId, loginBtnId, logoutBtnId, labelName) {
     let lastAuth = null;
+    let pollUI = null;
+
+    function stopPollUI() {
+      if (pollUI) {
+        clearInterval(pollUI);
+        pollUI = null;
+      }
+    }
 
     function renderAuth() {
       const statusEl = $(statusElId);
@@ -316,6 +387,7 @@
     }
 
     $(loginBtnId)?.addEventListener('click', () => {
+      stopPollUI();
       const loginBtn = $(loginBtnId);
       if (loginBtn) {
         loginBtn.disabled = true;
@@ -332,13 +404,18 @@
           lastAuth = { isAuth: false, waiting: true, code: d.user_code };
           renderAuth();
 
-          const pollUI = setInterval(() => {
+          stopPollUI();
+          pollUI = setInterval(() => {
             chrome.runtime.sendMessage({ type: 'CHECK_CLIENT_AUTH', client: clientKey }, (check) => {
               if (check && check.isAuth) {
-                clearInterval(pollUI);
+                stopPollUI();
                 lastAuth = { isAuth: true };
                 renderAuth();
                 log(`${labelName} Auth Successful!`);
+              } else if (check && check.waiting === false) {
+                stopPollUI();
+                lastAuth = { isAuth: false, error: 'expired_token' };
+                renderAuth();
               }
             });
           }, 3000);
@@ -350,6 +427,7 @@
     });
 
     $(logoutBtnId)?.addEventListener('click', () => {
+      stopPollUI();
       chrome.runtime.sendMessage({ type: 'LOGOUT_CLIENT', client: clientKey }, () => {
         lastAuth = { isAuth: false };
         renderAuth();
@@ -401,8 +479,7 @@
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
 
-      chrome.scripting.executeScript({
-        target: { tabId: tabs[0].id },
+      execInYouTubeTab(tabs[0], {
         func: () => {
           try {
             return JSON.parse(localStorage.getItem('ytSpoofingStream_status') || '{}');
@@ -495,7 +572,7 @@
             const isErr = stat.includes('HTTP') || stat.includes('Error') || stat.includes('Fail') ||
                           stat.includes('Login') || stat.includes('robot') || stat.includes('Unavailable');
             const isHQ = stat.includes('★') || stat.includes('774') || stat.includes('141');
-            const isCurrentPlaying = (d.activeMethod === client) && !isErr;
+            const isCurrentPlaying = (d.activeMethod === client || (typeof d.activeMethod === 'string' && d.activeMethod.startsWith(client))) && !isErr;
             const cls = isCurrentPlaying ? 'hq' : (isHQ ? 'ok' : (isOk ? 'ok' : (isErr ? 'err' : '')));
 
             const formatName = (name) => {

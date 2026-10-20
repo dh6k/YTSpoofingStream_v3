@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════╗
-// ║  YTSpoofingStream v0.0.8 — Bridge (ISOLATED world)               ║
+// ║  YTSpoofingStream v0.2.6 — Bridge (ISOLATED world)               ║
 // ║  Relays messages between MAIN world and Service Worker.          ║
 // ╚══════════════════════════════════════════════════════════════════╝
 
@@ -33,11 +33,17 @@ function safeSend(msg, callback, retryCount = 0) {
   }
 }
 
+const isValidVideoId = (v) => typeof v === 'string' && /^[\w-]{11}$/.test(v);
+
 window.addEventListener('message', (event) => {
   if (event.source !== window || !event.data) return;
 
   if (event.data.type === 'YTSS_FETCH_HQ') {
     const { videoId, title, author, requestId, context, opMode, preferredSource, excludeSource, forceFresh } = event.data;
+    if (!isValidVideoId(videoId)) {
+      window.postMessage({ type: 'YTSS_HQ_RESULT', requestId, success: false, results: [], error: 'invalid videoId' }, '*');
+      return;
+    }
     safeSend({ type: 'FETCH_HQ', videoId, title, author, context, opMode, preferredSource, excludeSource, forceFresh }, (response) => {
       window.postMessage({
         type: 'YTSS_HQ_RESULT',
@@ -48,21 +54,32 @@ window.addEventListener('message', (event) => {
   }
 
   if (event.data.type === 'YTSS_CLEAR_VIDEO_CACHE') {
-    safeSend({ type: 'CLEAR_VIDEO_CACHE', videoId: event.data.videoId });
+    const { videoId } = event.data;
+    if (videoId === undefined || videoId === null || isValidVideoId(videoId)) {
+      safeSend({ type: 'CLEAR_VIDEO_CACHE', videoId: isValidVideoId(videoId) ? videoId : null });
+    }
   }
 
   if (event.data.type === 'YTSS_CONFIRM_NO_774') {
-    safeSend({ type: 'CONFIRM_NO_774', videoId: event.data.videoId });
+    if (isValidVideoId(event.data.videoId)) {
+      safeSend({ type: 'CONFIRM_NO_774', videoId: event.data.videoId });
+    }
   }
 
   if (event.data.type === 'YTSS_STOP_HARVEST') {
     safeSend({ type: 'OFFSCREEN_STOP_HARVEST' });
   }
 
-  // ── Phase 1 (Option D): relay TV streaming context query.
-  //    MAIN world cannot call chrome.runtime directly; bridge forwards.
+  // YTSS_RELOAD_EXTENSION is intentionally NOT relayed: any script on the page
+  // can post window messages, and relaying it let pages reload the extension in a loop.
+
+  // Relay TV streaming context query: MAIN world cannot call chrome.runtime directly; bridge forwards.
   if (event.data.type === 'YTSS_FETCH_TVCTX') {
     const { videoId, requestId } = event.data;
+    if (!isValidVideoId(videoId)) {
+      window.postMessage({ type: 'YTSS_TVCTX_RESULT', requestId, streamingContext: null }, '*');
+      return;
+    }
     safeSend({ type: 'GET_TVCTX', videoId }, (response) => {
       window.postMessage({
         type: 'YTSS_TVCTX_RESULT',
@@ -87,6 +104,12 @@ window.addEventListener('message', (event) => {
 
   if (event.data.type === 'YTSS_AUDIO_ONLY_CHANGED') {
     chrome.storage.local.set({ audioOnly: !!event.data.audioOnly });
+  }
+
+  if (event.data.type === 'YTSS_RELOAD_RULES') {
+    safeSend({ type: 'RELOAD_RULES' }, (res) => {
+      window.postMessage({ type: 'YTSS_RELOAD_RULES_RESULT', success: !!res?.success }, '*');
+    });
   }
 });
 
@@ -132,9 +155,11 @@ function pickSettings(data) {
   return out;
 }
 
+const VALID_LOCALES = new Set(['en', 'vi', 'ja', 'ru', 'zh-cn', 'zh-tw']);
+
 async function pushLocaleData(lang) {
   try {
-    const l = lang || 'en';
+    const l = VALID_LOCALES.has(lang) ? lang : 'en';
     let url = chrome.runtime.getURL(`locales/${l}.json`);
     let res = await fetch(url);
     if (!res.ok && l !== 'en') {
@@ -146,8 +171,18 @@ async function pushLocaleData(lang) {
       window.postMessage({ type: 'YTSS_LOCALE_DATA', lang: l, strings }, '*');
     }
   } catch (e) {
-    console.warn('[YTSS-Bridge] Failed to load locale data:', e);
+    console.log('[YTSS-Bridge] Failed to load locale data:', e);
   }
+}
+
+function detectBrowserLang() {
+  const sysLang = (navigator.language || '').toLowerCase();
+  if (sysLang.startsWith('vi')) return 'vi';
+  if (sysLang.startsWith('ja')) return 'ja';
+  if (sysLang.startsWith('ru')) return 'ru';
+  if (sysLang === 'zh-tw' || sysLang === 'zh-hk' || sysLang === 'zh-mo' || sysLang.includes('hant')) return 'zh-tw';
+  if (sysLang.startsWith('zh')) return 'zh-cn';
+  return 'en';
 }
 
 function pushSettings() {
@@ -156,7 +191,7 @@ function pushSettings() {
     if (Object.keys(settings).length > 0) {
       window.postMessage({ type: 'YTSS_SETTINGS_UPDATE', settings }, '*');
     }
-    pushLocaleData(data?.uiLanguage || 'en');
+    pushLocaleData(data?.uiLanguage || detectBrowserLang());
   });
 }
 
