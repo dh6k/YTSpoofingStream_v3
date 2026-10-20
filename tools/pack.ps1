@@ -32,15 +32,21 @@ if (-not $ChromePath -or -not (Test-Path $ChromePath)) {
 $stage = Join-Path $root "dist"
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Path $stage | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $stage "src") | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $stage "assets") | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $stage "locales") | Out-Null
 
 $files = @(
-  "manifest.json", "background.js", "bridge.js", "inject.js",
-  "popup.html", "popup.js", "harvester.html", "harvester.js",
-  "ytm_harvester_cs.js", "icon16.png", "icon48.png", "icon128.png", "logo.svg"
+  "manifest.json",
+  "src/background.js", "src/bridge.js", "src/inject.js",
+  "src/popup.html", "src/popup.js", "src/harvester.html", "src/harvester.js",
+  "src/ytm_harvester_cs.js",
+  "assets/icon16.png", "assets/icon48.png", "assets/icon128.png", "assets/logo.svg"
 )
 foreach ($f in $files) {
   Copy-Item (Join-Path $root $f) (Join-Path $stage $f)
 }
+Copy-Item (Join-Path $root "locales\*.json") (Join-Path $stage "locales")
 
 $key = Join-Path $root "key.pem"
 $chromeArgs = @("--pack-extension=$stage")

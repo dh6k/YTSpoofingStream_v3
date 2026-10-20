@@ -106,6 +106,13 @@ window.addEventListener('message', (event) => {
     chrome.storage.local.set({ audioOnly: !!event.data.audioOnly });
   }
 
+  if (event.data.type === 'YTSS_SAVE_SETTINGS' && event.data.settings) {
+    const safe = pickSettings(event.data.settings);
+    if (Object.keys(safe).length > 0) {
+      chrome.storage.local.set(safe);
+    }
+  }
+
   if (event.data.type === 'YTSS_RELOAD_RULES') {
     safeSend({ type: 'RELOAD_RULES' }, (res) => {
       window.postMessage({ type: 'YTSS_RELOAD_RULES_RESULT', success: !!res?.success }, '*');
@@ -143,6 +150,8 @@ const EXPOSED_SETTINGS = [
   'shadowVolume',
   'operationMode',
   'audioOnly',
+  'volumeBalance',
+  'lang',
   'uiLanguage',
 ];
 

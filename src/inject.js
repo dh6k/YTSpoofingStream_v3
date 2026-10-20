@@ -1258,7 +1258,7 @@
     return [(u8[pos + 1] | (u8[pos + 2] << 8) | (u8[pos + 3] << 16) | (u8[pos + 4] << 24)) >>> 0, pos + 5];
   }
 
-  const UmpMseController774 = {
+  var UmpMseController774 = {
     session: null,
     isActive: false,
     videoId: null,
@@ -1806,7 +1806,7 @@
   // ─── STUDIO ENGINE 774 ─────────────────────────────────────────────
   // High-Fidelity Audio Engine: Direct Hardware Opus Playback • Sync Engine • Unified Player Binding
   const initialVolState = readStoredYoutubeVolumeState();
-  const StudioEngine774 = {
+  var StudioEngine774 = {
     audio: null,
     activeVideoId: null,
     best774Candidate: null,
@@ -4062,7 +4062,7 @@
 
   // ─── NEXT VIDEO PREFETCH CONTROLLER ─────────────────────────────────
   // Last 3s countdown & ephemeral cache prefetch controller
-  const NextVideoManager = {
+  var NextVideoManager = {
     currentVideoId: null,
     nextVideoId: null,
     hasFetchedCall1: false,
@@ -5388,7 +5388,7 @@
   // ═══════════════════════════════════════════════════════════════════
   // CLASSIC 2014 "STATS FOR NERDS" PANEL (V3 / original layout) & SPOOFER
   // ═══════════════════════════════════════════════════════════════════
-  const StatsForNerdsSpoofer = {
+  var StatsForNerdsSpoofer = {
     initialized: false,
     timer: null,
     visible: false,
@@ -5398,6 +5398,23 @@
     _lastTs: 0,
     _lastTime: 0,
     _painted: 0,
+    _ttPolicy: null,
+
+    toSafeHtml(html) {
+      try {
+        if (window.trustedTypes && window.trustedTypes.createPolicy) {
+          if (!this._ttPolicy) {
+            this._ttPolicy = window.trustedTypes.defaultPolicy
+              || window.trusted_policy
+              || window.trustedTypes.createPolicy('ytss-html', { createHTML: (s) => s });
+          }
+          if (this._ttPolicy && typeof this._ttPolicy.createHTML === 'function') {
+            return this._ttPolicy.createHTML(html);
+          }
+        }
+      } catch (e) {}
+      return html;
+    },
 
     getCodecText() {
       if (!S.enabled) return null;
@@ -5693,7 +5710,7 @@
       // Classic frame/bytes table
       const table = document.createElement('table');
       table.style.cssText = 'width:100%;border-collapse:collapse;margin-top:6px;font-size:10px;';
-      table.innerHTML = [
+      table.innerHTML = this.toSafeHtml([
         '<tr>',
         '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Decoded Frames</th>',
         '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Dropped Frames</th>',
@@ -5718,7 +5735,7 @@
         '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
         '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
         '</tr>'
-      ].join('');
+      ].join(''));
       panel.appendChild(table);
 
       if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
@@ -5803,7 +5820,7 @@
       const dash = `yes (${is774 ? 399 : 399}/${audioItag})`;
       const bw = this.bandwidthKbps(v);
 
-      body.innerHTML = [
+      body.innerHTML = this.toSafeHtml([
         this.row('Video ID', videoId),
         this.row('Dimensions', dimensions),
         this.row('Resolution', resLabel),
@@ -5816,7 +5833,7 @@
         `<span style="display:inline-block;width:120px;height:8px;border:1px solid #666;vertical-align:middle;margin-right:6px;">`,
         `<span style="display:block;height:100%;width:${Math.min(100, bw / 200)}%;background:#c9a227;"></span></span>`,
         `<span>${bw} Kbps</span></div>`
-      ].join('');
+      ].join(''));
 
       const fr = document.getElementById('ytss-sfn-frames');
       const by = document.getElementById('ytss-sfn-bytes');
@@ -5904,7 +5921,7 @@
     return str;
   }
 
-  const InPlayerSettingsUI = {
+  var InPlayerSettingsUI = {
     panel: null,
     isOpen: false,
     eventsHooked: false,
@@ -5931,7 +5948,14 @@
         #ytss-hud-lang-toggle:hover { background: rgba(255,255,255,0.22) !important; border-color: rgba(255,255,255,0.4) !important; }
         #ytss-panel-close:hover { background: rgba(255,255,255,0.15) !important; color: #fff !important; }
       `;
-      (document.head || document.documentElement).appendChild(st);
+      const root = document.head || document.documentElement;
+      if (root) {
+        root.appendChild(st);
+      } else {
+        document.addEventListener('DOMContentLoaded', () => {
+          (document.head || document.documentElement)?.appendChild(st);
+        }, { once: true });
+      }
     },
 
     createPanel() {
@@ -6358,7 +6382,7 @@
 
   // ─── IN-PLAYER HUD BADGE UI ─────────────────────────────────────────
   // Displays ★ 774 or fallback badge directly inside native YouTube controls
-  const PlayerBadgeUI = {
+  var PlayerBadgeUI = {
     inject() {
       if (!S.enabled) {
         const container = document.getElementById('ytss-vol-container');
@@ -6447,7 +6471,7 @@
         aoBtn.setAttribute('role', 'button');
         aoBtn.setAttribute('aria-label', 'Audio-Only Mode');
         // Headphone icon (currentColor) — cyan accent like stock YT control
-        aoBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3a9 9 0 0 0-9 9v7a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2H5v-1a7 7 0 0 1 14 0v1h-2a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-7a9 9 0 0 0-9-9z"/></svg>';
+        aoBtn.innerHTML = StatsForNerdsSpoofer.toSafeHtml('<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3a9 9 0 0 0-9 9v7a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2H5v-1a7 7 0 0 1 14 0v1h-2a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-7a9 9 0 0 0-9-9z"/></svg>');
         aoBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           toggleAudioOnly();
@@ -6563,14 +6587,17 @@
         const c = itag === 141 ? '#5ec8d8' : '#e85a5a';
         el.style.color = c;
         el.style.borderColor = itag === 141 ? 'rgba(94,200,216,0.55)' : 'rgba(225,29,29,0.55)';
+        const bitrate = getActiveBitrate();
+        const method = status.activeMethod || ((S.operationMode === 'TV_HEADLESS' || S.operationMode === 'TV_RELAY') ? 'TVHTML5' : 'YTM_HARVESTER');
+        const isStudio = (typeof StudioEngine774 !== 'undefined' && StudioEngine774.isActive);
         el.title = itag === 141
           ? 'Studio Master AAC 141 (256kbps Full Fidelity)'
-          : 'HQ Opus 774 (256k+ Full Frequency Spectrum)';
+          : t(isStudio ? 'badgeTooltipStudio' : 'badgeTooltipNative', { itag, bitrate, method });
       } else {
         el.textContent = '251';
         el.style.color = '#8a8a8a';
         el.style.borderColor = 'rgba(255,255,255,0.18)';
-        el.title = 'Native Audio (ITAG 251)';
+        el.title = t('badgeTooltip251');
       }
     },
 
