@@ -2538,15 +2538,18 @@
               this._silenceElement(video);
               this.logSteadyVolumeState('playing');
               const playerVid = document.getElementById('movie_player')?.getVideoData?.()?.video_id;
-              // Align silent video to master audio clock if video drifted while audio was buffering.
-              // Never yank video back to old audio position during/shortly after a seek or large jump (>1.5s)!
-              const canResyncVideoOnPlay = (Date.now() - (this._lastSeekTime || 0) > 3000) && !this.audio.seeking && !this._trackEnded;
-              if ((!playerVid || playerVid === this.activeVideoId) && !video.seeking && !this._isSeeking && !this._isInternalVideoSync && canResyncVideoOnPlay) {
-                const diff = Math.abs(video.currentTime - this.audio.currentTime);
-                if (diff > 0.40 && diff <= 1.5 && this.isTimeBuffered(video, this.audio.currentTime)) {
-                  this._isInternalVideoSync = true;
-                  try { video.currentTime = this.audio.currentTime; } catch (e) {}
-                  setTimeout(() => { this._isInternalVideoSync = false; }, 250);
+              // <video> is the MASTER clock: if the 774 <audio> (re)starts at a stale position after a
+              // buffering cycle, nudge only the slave <audio> forward. NEVER pull the picture back to an
+              // old audio position — that write was one of the visible UMP back-jumps (Symptom B).
+              const canResyncAudioOnPlay = (Date.now() - (this._lastSeekTime || 0) > 3000) && !this.audio.seeking && !this._trackEnded;
+              if ((!playerVid || playerVid === this.activeVideoId) && !document.hidden && !video.paused && !video.seeking && !this._isSeeking && !this._isInternalVideoSync && canResyncAudioOnPlay) {
+                const audioBehindSec = video.currentTime - this.audio.currentTime;
+                if (audioBehindSec > 0.40 && audioBehindSec <= 1.5 && this.isTimeBuffered(this.audio, video.currentTime)) {
+                  try {
+                    this.audio.currentTime = video.currentTime;
+                    this._lastAudioTime = video.currentTime;
+                    this._lastAudioAdvance = Date.now();
+                  } catch (e) {}
                 }
               }
             }
@@ -4438,15 +4441,19 @@
         return;
       }
 
-      // Small natural playback drift (0.45s < absDiff <= 1.5s): gently align video to audio
-      const canResyncVideo = (now - (this._lastSeekTime || 0) > 3000) && !this._isSeeking && !this.audio.seeking && !video.seeking && !this._trackEnded;
+      // Small natural playback drift (0.45s < absDiff <= 1.5s): <video> is the MASTER clock, so only
+      // the slave <audio> may be corrected. Writing video.currentTime here yanked the picture backwards
+      // and produced the visible UMP jitter (Symptom B). Two guards keep this slave correction safe:
+      //   - only when audio is BEHIND the master (never undo a forward cluster-gap rescue), and
+      //   - only when the audio MSE buffer strictly covers the master time (no gap-fight / re-seek loop).
+      const canResyncAudio = (now - (this._lastSeekTime || 0) > 3000) && !this._isSeeking && !this.audio.seeking && !video.seeking && !this._trackEnded;
 
-      if (absDiff > 0.45 && absDiff <= 1.5 && !this._isAudioBuffering && !this.audio.paused && canResyncVideo) {
-        if (this.isTimeBuffered(video, aTime)) {
+      if (absDiff > 0.45 && absDiff <= 1.5 && drift < 0 && !this._isAudioBuffering && !this.audio.paused && canResyncAudio) {
+        if (this.isTimeBuffered(this.audio, vTime)) {
           this._lastSeekTime = now;
-          this._isInternalVideoSync = true;
-          try { video.currentTime = aTime; } catch (e) {}
-          setTimeout(() => { this._isInternalVideoSync = false; }, 250);
+          try { this.audio.currentTime = vTime; } catch (e) {}
+          this._lastAudioTime = vTime;
+          this._lastAudioAdvance = Date.now();
         }
       }
     },
