@@ -137,6 +137,7 @@
       if (typeof StudioEngine774 !== 'undefined' && StudioEngine774.isActive) {
         StudioEngine774.updateNormalizedGain(StudioEngine774.activeVideoId);
         StudioEngine774.syncVol(getMainVideoElement());
+        StudioEngine774.logSteadyVolumeState('settingsChange');
       }
 
       // Invalidate cache & re-fetch if operation mode changed OR extension was just re-enabled!
@@ -685,6 +686,9 @@
       const statsForVideo = {};
 
       for (const clientRes of results) {
+        if (typeof clientRes.loudnessDb === 'number' && !isNaN(clientRes.loudnessDb) && !loudnessDbMap.has(videoId)) {
+          loudnessDbMap.set(videoId, clientRes.loudnessDb);
+        }
         if (clientRes.audioFormats?.length > 0) {
           const audio = clientRes.audioFormats;
           const itags = audio.map(f => f.itag);
@@ -722,8 +726,14 @@
       const has774 = only774.length > 0;
       if (has774) {
         confirmedNo774Videos.delete(videoId);
+        const resolvedLdb = typeof only774[0]?.loudnessDb === 'number'
+          ? only774[0].loudnessDb
+          : (loudnessDbMap.get(videoId) ?? null);
+        if (typeof resolvedLdb === 'number' && !isNaN(resolvedLdb)) {
+          loudnessDbMap.set(videoId, resolvedLdb);
+        }
         // Strip 251 and non-774 audio formats so 251 never goes into the player after fetch
-        cacheSet(videoId, only774, tvCtx, statsForVideo, loudnessDbMap.get(videoId) ?? null);
+        cacheSet(videoId, only774, tvCtx, statsForVideo, resolvedLdb);
         failedFetches.delete(videoId);
         if (isCurrentWatchVideo(videoId)) {
           tryUpgradeVideo(videoId, 'FetchComplete');
@@ -885,9 +895,12 @@
         }
         const numV = (typeof v === 'number' && !isNaN(v)) ? Math.max(0, Math.min(1.0, v)) : 1.0;
         if (typeof StudioEngine774 !== 'undefined') {
+          const userVol = typeof StudioEngine774.resolveRawUserVolume === 'function'
+            ? StudioEngine774.resolveRawUserVolume(numV)
+            : numV;
           StudioEngine774._lastUserMuteOrVolIntentAt = Date.now();
-          this._userVol = numV;
-          StudioEngine774._userVol = numV;
+          this._userVol = userVol;
+          StudioEngine774._userVol = userVol;
           if (numV > 0) {
             this._userMuted = false;
             StudioEngine774._userMuted = false;
@@ -901,7 +914,7 @@
               StudioEngine774._silenceElement(this);
             }
             if (StudioEngine774.audio && StudioEngine774.isActive) {
-              StudioEngine774.syncVolDirect(numV);
+              StudioEngine774.syncVolDirect(userVol);
             }
           } else {
             try { descVolume.set.call(this, numV); } catch (e) {}
@@ -2085,6 +2098,52 @@
     _lastAudioAdvance: 0,
     _audioStalledAt: 0,
     _currentNormGain: 1.0,
+    _currentLoudnessDb: null,
+
+    // Unwraps YouTube's pre-attenuated video.volume (= sliderVol * 10^(-loudnessDb/20))
+    // so StudioEngine774._userVol always stores raw user slider volume (0..1) and never double-normalizes.
+    resolveRawUserVolume(numV) {
+      if (typeof numV !== 'number' || isNaN(numV) || numV <= 0) return 0;
+      try {
+        const p = document.getElementById('movie_player');
+        if (p && typeof p.getVolume === 'function') {
+          const pv = p.getVolume();
+          if (typeof pv === 'number' && !isNaN(pv) && pv > 0) {
+            const sliderVol = Math.max(0, Math.min(1.0, pv / 100));
+            const vid = this.activeVideoId || (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
+            const lDb = (typeof this._currentLoudnessDb === 'number' && !isNaN(this._currentLoudnessDb))
+              ? this._currentLoudnessDb
+              : (vid && loudnessDbMap.has(vid) ? loudnessDbMap.get(vid) : null);
+            if (typeof lDb === 'number' && lDb > 0) {
+              const ytNormGain = Math.max(0.05, Math.min(1.0, Math.pow(10, -lDb / 20)));
+              const expectedYtVol = sliderVol * ytNormGain;
+              if (Math.abs(numV - expectedYtVol) < 0.025 && Math.abs(numV - sliderVol) > 0.025) {
+                return sliderVol;
+              }
+            }
+          }
+        }
+      } catch (e) {}
+      return numV;
+    },
+
+    logSteadyVolumeState(reason = 'steady') {
+      try {
+        const video = getMainVideoElement();
+        const vid = this.activeVideoId || (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
+        const lDb = (typeof this._currentLoudnessDb === 'number' && !isNaN(this._currentLoudnessDb))
+          ? this._currentLoudnessDb
+          : (vid && loudnessDbMap.has(vid) ? loudnessDbMap.get(vid) : null);
+        const normGain = this.getNormalizedGain();
+        const audioVol = this.audio ? descVolume.get.call(this.audio) : null;
+        const videoVolGetter = video ? video.volume : null;
+        const videoRealVol = video ? descVolume.get.call(video) : null;
+        console.log(
+          TAG,
+          `[StudioEngine774][VolumeDiag:${reason}] vid=${vid} volumeBalance=${Boolean(S.volumeBalance)} loudnessDb=${lDb} normalizedGain=${normGain !== null ? normGain.toFixed(4) : null} audio.volume=${audioVol !== null ? audioVol.toFixed(4) : null} video.volume=${videoVolGetter !== null ? videoVolGetter.toFixed(4) : null} (real=${videoRealVol !== null ? videoRealVol.toFixed(4) : null}) userVol=${this._userVol}`
+        );
+      } catch (e) {}
+    },
 
     hasRecentUserMuteOrVolIntent() {
       return (Date.now() - (this._lastUserMuteOrVolIntentAt || 0)) < 1500;
@@ -2220,6 +2279,7 @@
                 return;
               }
               this._silenceElement(video);
+              this.logSteadyVolumeState('playing');
               const playerVid = document.getElementById('movie_player')?.getVideoData?.()?.video_id;
               // Align silent video to master audio clock if video drifted while audio was buffering
               if ((!playerVid || playerVid === this.activeVideoId) && !video.seeking && !this._isSeeking && !this._isInternalVideoSync) {
@@ -2481,9 +2541,10 @@
           },
           set(v) {
             const numV = (typeof v === 'number' && !isNaN(v)) ? Math.max(0, Math.min(1.0, v)) : 1.0;
+            const userVol = StudioEngine774.resolveRawUserVolume(numV);
             StudioEngine774._lastUserMuteOrVolIntentAt = Date.now();
-            this._userVol = numV;
-            StudioEngine774._userVol = numV;
+            this._userVol = userVol;
+            StudioEngine774._userVol = userVol;
             if (numV > 0) {
               this._userMuted = false;
               StudioEngine774._userMuted = false;
@@ -2495,7 +2556,7 @@
             if ((StudioEngine774.isActive || StudioEngine774._isTransitioning) && !StudioEngine774.isAdActive()) {
               StudioEngine774._silenceElement(this);
               if (StudioEngine774.audio && StudioEngine774.isActive) {
-                StudioEngine774.syncVolDirect(numV);
+                StudioEngine774.syncVolDirect(userVol);
               }
             } else {
               try { descVolume.set.call(this, numV); } catch (e) {}
@@ -3437,26 +3498,39 @@
     },
 
     updateNormalizedGain(videoId) {
-      if (!S.volumeBalance) {
-        this._currentNormGain = 1.0;
-        return 1.0;
-      }
       const vid = videoId || this.activeVideoId || (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
       let lDb = null;
 
-      if (vid && loudnessDbMap.has(vid)) {
+      // 0. Prefer per-format loudnessDb on active/pending 774 candidate when available
+      const cand774 = (this.activeVideoId === vid && this.best774Candidate)
+        ? this.best774Candidate
+        : (this.pending774?.videoId === vid ? this.pending774.best774 : null);
+      if (typeof cand774?.loudnessDb === 'number' && !isNaN(cand774.loudnessDb)) {
+        lDb = cand774.loudnessDb;
+      }
+
+      if (lDb === null && vid && loudnessDbMap.has(vid)) {
         lDb = loudnessDbMap.get(vid);
       }
 
-      // 1. Check YouTube player's playerResponse audioConfig
+      // 1. Check YouTube player's playerResponse / Vorapis V3 ytplayer.config audioConfig
       if (lDb === null) {
         try {
           const player = document.getElementById('movie_player');
-          const pr = player?.getPlayerResponse?.() || window.ytInitialPlayerResponse;
-          const pVid = pr?.videoDetails?.videoId;
-          if (!vid || !pVid || pVid === vid) {
-            if (typeof pr?.playerConfig?.audioConfig?.loudnessDb === 'number') {
-              lDb = pr.playerConfig.audioConfig.loudnessDb;
+          const candidates = [
+            player?.getPlayerResponse?.(),
+            window.ytInitialPlayerResponse,
+            window.ytplayer?.config?.initialResponse,
+            window.ytplayer?.config?.args?.raw_player_response
+          ];
+          for (const pr of candidates) {
+            if (!pr) continue;
+            const pVid = pr?.videoDetails?.videoId;
+            if (!vid || !pVid || pVid === vid) {
+              if (typeof pr?.playerConfig?.audioConfig?.loudnessDb === 'number') {
+                lDb = pr.playerConfig.audioConfig.loudnessDb;
+                break;
+              }
             }
           }
         } catch (e) {}
@@ -3469,6 +3543,9 @@
           lDb = cached.loudnessDb;
         } else if (typeof cached?.audioConfig?.loudnessDb === 'number') {
           lDb = cached.audioConfig.loudnessDb;
+        } else if (Array.isArray(cached?.formats)) {
+          const fWithLdb = cached.formats.find(f => typeof f.loudnessDb === 'number' && !isNaN(f.loudnessDb));
+          if (fWithLdb) lDb = fWithLdb.loudnessDb;
         }
       }
 
@@ -3482,26 +3559,35 @@
             const userPct = parseFloat(m[1]);
             const normPct = parseFloat(m[2]);
             if (userPct > 0 && normPct > 0) {
-              this._currentNormGain = Math.max(0.15, Math.min(1.0, normPct / userPct));
+              const ratio = Math.max(0.15, Math.min(1.0, normPct / userPct));
+              this._currentNormGain = S.volumeBalance ? ratio : 1.0;
               return this._currentNormGain;
             }
           }
         } catch (e) {}
       }
 
-      if (typeof lDb === 'number' && !isNaN(lDb)) {
-        if (vid) loudnessDbMap.set(vid, lDb);
-        if (lDb > 0) {
+      this._currentLoudnessDb = (typeof lDb === 'number' && !isNaN(lDb)) ? lDb : null;
+      if (this._currentLoudnessDb !== null && vid) {
+        loudnessDbMap.set(vid, this._currentLoudnessDb);
+      }
+
+      if (!S.volumeBalance) {
+        this._currentNormGain = 1.0;
+        return 1.0;
+      }
+
+      if (this._currentLoudnessDb !== null) {
+        if (this._currentLoudnessDb > 0) {
           // Attenuate loud track to match target loudness (-14 LUFS): gain = 10^(-loudnessDb / 20)
-          this._currentNormGain = Math.max(0.15, Math.min(1.0, Math.pow(10, -lDb / 20)));
+          this._currentNormGain = Math.max(0.15, Math.min(1.0, Math.pow(10, -this._currentLoudnessDb / 20)));
         } else {
           // Track is at or below target loudness: no attenuation needed
           this._currentNormGain = 1.0;
         }
       } else {
-        // Fallback empirical threshold: -4.8 dB attenuation (gain ~0.575)
-        // Derived from benchmark tests on typical modern music tracks
-        this._currentNormGain = 0.575;
+        // When loudnessDb is unknown, do not apply arbitrary hardcoded attenuation (1.0 = 0 dB)
+        this._currentNormGain = 1.0;
       }
       return this._currentNormGain;
     },
@@ -4084,6 +4170,7 @@
       }
 
       this.startWatchdog();
+      this.logSteadyVolumeState('applyToVideo');
 
       status.activeAudioItag = 774;
       status.activeMethod = best774._src || 'YTM_HARVESTER';
@@ -4584,6 +4671,11 @@
 
   // ─── HQ FILTER & MERGE ENGINE (Direct Fallback) ─────────────────────
   function processPlayerResponse(json, hqData = null) {
+    const vidFromPr = json?.videoDetails?.videoId || (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
+    const prLoudnessDb = json?.playerConfig?.audioConfig?.loudnessDb;
+    if (vidFromPr && typeof prLoudnessDb === 'number' && !isNaN(prLoudnessDb) && !loudnessDbMap.has(vidFromPr)) {
+      loudnessDbMap.set(vidFromPr, prLoudnessDb);
+    }
     if (!json?.streamingData?.adaptiveFormats) {
       // SABR-only / rewritten response: nothing to merge, but still surface harvest stats
       // so the popup Streams counter is not stuck at 0 while 774 is already playing.
@@ -7229,6 +7321,10 @@
           if (!rawText) return;
           const json = JSON.parse(rawText);
           const videoId = json.videoDetails?.videoId;
+          const xhrLdb = json.playerConfig?.audioConfig?.loudnessDb;
+          if (videoId && typeof xhrLdb === 'number' && !isNaN(xhrLdb)) {
+            loudnessDbMap.set(videoId, xhrLdb);
+          }
           const isPlayerActive = isPlayerActiveOnPage();
           const urlVid = (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
           if (videoId && isPlayerActive && (!urlVid || videoId === urlVid)) {

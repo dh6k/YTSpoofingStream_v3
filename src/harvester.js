@@ -99,7 +99,8 @@
         bitrate: e.data.bitrate,
         averageBitrate: e.data.averageBitrate,
         contentLength: e.data.contentLength,
-        approxDurationMs: e.data.approxDurationMs
+        approxDurationMs: e.data.approxDurationMs,
+        loudnessDb: e.data.loudnessDb
       });
       return;
     }

@@ -882,12 +882,21 @@ async function fetchFromClient(videoId, client) {
     if (data.playabilityStatus?.status === 'OK' && data.streamingData) {
       const allFormats = data.streamingData.adaptiveFormats || [];
       const audio = allFormats.filter(f => (f.mimeType || '').includes('audio/'));
+      const trackLoudnessDb = typeof data.playerConfig?.audioConfig?.loudnessDb === 'number'
+        ? data.playerConfig.audioConfig.loudnessDb
+        : null;
 
       // _cver rides along so inject.js can restore the exact client version this URL
       // was signed under, instead of guessing from a table that can drift out of sync.
       const result = {
         source: client.name,
-        audioFormats: audio.map(f => ({ ...f, _src: client.name, _cver: client.clientVersion })),
+        loudnessDb: trackLoudnessDb,
+        audioFormats: audio.map(f => ({
+          ...f,
+          loudnessDb: typeof f.loudnessDb === 'number' ? f.loudnessDb : trackLoudnessDb,
+          _src: client.name,
+          _cver: client.clientVersion
+        })),
       };
 
       // ── Capture TVHTML5 streaming context.
@@ -1259,6 +1268,7 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
         averageBitrate: msg.averageBitrate || realBitrate,
         contentLength: msg.contentLength,
         approxDurationMs: msg.approxDurationMs,
+        loudnessDb: typeof msg.loudnessDb === 'number' ? msg.loudnessDb : undefined,
         audioQuality: 'AUDIO_QUALITY_HIGH',
         _src: activeHarvestSession.opMode === 'TV_HEADLESS' ? 'TV_HEADLESS' : 'YTM_HARVESTER',
       };

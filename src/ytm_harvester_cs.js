@@ -59,12 +59,16 @@
     const target774 = af.find(f => f.itag === 774);
     if (target774) {
       console.log(TAG, `★ Genuine ITAG 774 found for ${urlVid}! Locking audio formats strictly to 774`);
+      const trackLoudnessDb = typeof target774.loudnessDb === 'number'
+        ? target774.loudnessDb
+        : (typeof json.playerConfig?.audioConfig?.loudnessDb === 'number' ? json.playerConfig.audioConfig.loudnessDb : undefined);
       cached774Metadata = {
         bitrate: target774.bitrate,
         averageBitrate: target774.averageBitrate,
         contentLength: target774.contentLength,
         approxDurationMs: target774.approxDurationMs,
-        audioSampleRate: target774.audioSampleRate
+        audioSampleRate: target774.audioSampleRate,
+        loudnessDb: trackLoudnessDb
       };
       // Strip serverAbrStreamingUrl so YTM player uses direct HTTP GET with deciphered n + pot and itag=774 in URL
       delete json.streamingData.serverAbrStreamingUrl;
@@ -200,7 +204,8 @@
         bitrate: cached774Metadata?.bitrate,
         averageBitrate: cached774Metadata?.averageBitrate,
         contentLength: cached774Metadata?.contentLength,
-        approxDurationMs: cached774Metadata?.approxDurationMs
+        approxDurationMs: cached774Metadata?.approxDurationMs,
+        loudnessDb: cached774Metadata?.loudnessDb
       }, PARENT_ORIGIN);
     } catch (e) {}
   }
