@@ -1074,7 +1074,7 @@
       return origPause.apply(this, args);
     }
     try {
-      if (typeof StudioEngine774 !== 'undefined' && StudioEngine774.isActive && !StudioEngine774.isAdActive()) {
+      if (typeof StudioEngine774 !== 'undefined' && !StudioEngine774.isAdActive()) {
         if (this === StudioEngine774.audio) {
           return origPause.apply(this, args);
         }
@@ -1083,13 +1083,16 @@
            (this.closest && this.closest('#movie_player, .html5-video-player')));
         if (isMainVideo) {
           const g = window.__ytssPauseGesture;
-          const userPauseIntent = g && !g.wasPaused && !fsBusy() && (Date.now() - g.at) < 450;
+          const seekBusy = typeof StudioEngine774.isSeekInProgress === 'function' && StudioEngine774.isSeekInProgress();
+          const userPauseIntent = g && !g.wasPaused && !fsBusy() && !seekBusy && (Date.now() - g.at) < 450;
           if (userPauseIntent && typeof StudioEngine774.lockPause === 'function') {
             StudioEngine774.lockPause();
           }
-          const other = StudioEngine774.audio;
-          if (other && !other.paused) {
-            try { origPause.call(other); } catch (e) {}
+          if (StudioEngine774.isActive) {
+            const other = StudioEngine774.audio;
+            if (other && !other.paused) {
+              try { origPause.call(other); } catch (e) {}
+            }
           }
         }
       }
@@ -1122,15 +1125,53 @@
   document.addEventListener('webkitfullscreenchange', onFsChange, true);
   const fsBusy = () => Date.now() < (window.__ytssFsBusyUntil || 0);
 
+  const isSeekUiTarget = (t) => !!(
+    t && typeof t.closest === 'function' &&
+    t.closest('.ytp-progress-bar, .html5-progress-bar, .ytp-progress-bar-container, .html5-progress-bar-container, .html5-progress-list, .html5-play-progress, .html5-load-progress, .html5-storyboard, .ytp-scrubber-container, .html5-scrubber-button, .ytp-chapter-container, .ytp-fine-scrubbing-container, .ytp-timed-markers-container, .ytp-ad-progress-list, [class*="progress-bar"], [class*="scrubber"], a[href*="t="], ytd-macro-markers-list-item-renderer')
+  );
+  const isVolUiTarget = (t) => !!(
+    t && typeof t.closest === 'function' &&
+    t.closest('.ytp-mute-button, .ytp-volume-panel, .html5-volume-panel, .ytp-volume-area, .ytp-volume-slider, .ytp-volume-slider-handle, .ytp-volume-icon, [class*="volume"]')
+  );
+
   document.addEventListener('pointerdown', (e) => {
     if (!e.isTrusted) return;
+    window.__ytssPointerDown = true;
+    window.__ytssPointerDownAt = Date.now();
+    if (isSeekUiTarget(e.target)) {
+      if (typeof StudioEngine774 !== 'undefined') {
+        StudioEngine774._lastUserSeekIntentAt = Date.now();
+        StudioEngine774._isTimelineScrubbing = true;
+        StudioEngine774._timelineScrubUntil = Date.now() + 1500;
+      }
+      return;
+    }
+    if (isVolUiTarget(e.target)) {
+      if (typeof StudioEngine774 !== 'undefined') {
+        StudioEngine774._lastUserMuteOrVolIntentAt = Date.now();
+      }
+      return;
+    }
     const v = getMainVideoElement();
     window.__ytssPauseGesture = {
       at: Date.now(),
       wasPaused: !!(v && (v.paused || v.ended)),
       used: false,
+      source: 'pointer',
     };
   }, true);
+
+  const onPointerEnd = () => {
+    window.__ytssPointerDown = false;
+    if (typeof StudioEngine774 !== 'undefined' && StudioEngine774._isTimelineScrubbing) {
+      StudioEngine774._isTimelineScrubbing = false;
+      StudioEngine774._timelineScrubUntil = Date.now() + 600;
+    }
+  };
+  ['pointerup', 'mouseup', 'pointercancel', 'touchend'].forEach((evt) => {
+    document.addEventListener(evt, onPointerEnd, { capture: true, passive: true });
+  });
+
   document.addEventListener('keydown', (e) => {
     if (!e.isTrusted) return;
     if (e.code === 'Space' || e.code === 'KeyK' || e.code === 'MediaPlayPause' || e.code === 'MediaPlay') {
@@ -1139,6 +1180,7 @@
         at: Date.now(),
         wasPaused: !!(v && (v.paused || v.ended)),
         used: false,
+        source: 'key',
       };
     }
   }, true);
@@ -1655,10 +1697,45 @@
       return null;
     },
 
+    getStrictBufferedRange(sb, timeSec) {
+      if (!sb || typeof timeSec !== 'number' || isNaN(timeSec)) return null;
+      try {
+        const b = sb.buffered;
+        for (let i = 0; i < b.length; i++) {
+          const s = b.start(i);
+          const e = b.end(i);
+          if (timeSec >= s - 0.05 && timeSec <= e - 0.05) {
+            return { start: s, end: e };
+          }
+        }
+      } catch (e) {}
+      return null;
+    },
+
+    findNearestForwardBufferedRange(sb, minSec, maxSec) {
+      if (!sb) return null;
+      try {
+        const b = sb.buffered;
+        let best = null;
+        for (let i = 0; i < b.length; i++) {
+          const s = b.start(i);
+          const e = b.end(i);
+          if (e - s < 0.08) continue;
+          if (s >= minSec - 0.05 && s <= maxSec) {
+            if (!best || s < best.start) {
+              best = { start: s, end: e };
+            }
+          }
+        }
+        return best;
+      } catch (e) {}
+      return null;
+    },
+
     flushQueue(session) {
       if (!session || session.aborted || !session.sourceBuffer) return;
       if (session.sourceBuffer.updating || session.appendQueue.length === 0) return;
-      if (session.mediaSource.readyState !== 'open') return;
+      if (session.mediaSource.readyState !== 'open' && session.mediaSource.readyState !== 'ended') return;
       const chunk = session.appendQueue.shift();
       try {
         session.sourceBuffer.appendBuffer(chunk);
@@ -1680,12 +1757,24 @@
       const video = getMainVideoElement();
       const audio = StudioEngine774.audio;
       const vTime = getVideoTimeFor(session.videoId);
-      const curSec = vTime > 0
-        ? vTime
-        : (audio && !isNaN(audio.currentTime) ? audio.currentTime : 0);
+      const seekTarget = (typeof session.seekTargetSec === 'number' && !isNaN(session.seekTargetSec))
+        ? session.seekTargetSec
+        : null;
+      const curSec = seekTarget !== null
+        ? seekTarget
+        : (vTime > 0
+            ? vTime
+            : (audio && !isNaN(audio.currentTime) ? audio.currentTime : 0));
 
       let targetMs = 0;
-      const bufEndSec = this.getBufferedEndFor(session.sourceBuffer, curSec);
+      let bufEndSec = this.getBufferedEndFor(session.sourceBuffer, curSec);
+      if (seekTarget !== null) {
+        const strictSeekCov = this.getStrictBufferedRange(session.sourceBuffer, seekTarget);
+        const fwdSeekCov = this.findNearestForwardBufferedRange(session.sourceBuffer, seekTarget, seekTarget + 2.5);
+        if (!strictSeekCov && !fwdSeekCov) {
+          bufEndSec = null;
+        }
+      }
 
       if (!session.hasInit || bufEndSec === null) {
         targetMs = Math.max(0, Math.floor(curSec * 1000));
@@ -1803,6 +1892,9 @@
               console.log(TAG, `[UmpMse774] Queued 774 WebM Init Segment (${seg.data.length}B) for ${session.videoId}`);
             }
           } else {
+            if (session.seekTargetSec !== null) {
+              session.seekTargetSec = null;
+            }
             if (session.lastAppendedSeq === seg.seq) {
               session.lastContigEndMs = Math.max(session.lastContigEndMs || 0, seg.startMs + seg.durMs);
             } else {
@@ -1830,16 +1922,33 @@
     onSeek(targetSec) {
       const session = this.session;
       if (!session || session.aborted || !this.isActive || !session.sourceBuffer) return;
-      const cov = this.getBufferedEndFor(session.sourceBuffer, targetSec);
-      if (cov === null) {
-        // Target seek time is outside current MSE buffer -> abort any old in-flight fetch (if init already done) and pump immediately!
+      const strictCov = this.getStrictBufferedRange(session.sourceBuffer, targetSec);
+      if (strictCov === null) {
+        // Target seek time is outside strict MSE buffer -> abort any old in-flight fetch (if init already done) and pump immediately!
+        session.seekTargetSec = targetSec;
         session.lastContigEndMs = 0;
+        session.lastAppendedSeq = -1;
         session.reachedEof = false;
+        session.endedStream = false;
+        if (session.hasInit && !session.sourceBuffer.updating && session.appendQueue.length > 0) {
+          session.appendQueue.length = 0;
+        }
         if (session.hasInit && session.abortCtrl) {
           try { session.abortCtrl.abort(); } catch (e) {}
           session.inFlight = false;
         }
         this.pump(session);
+      } else {
+        session.seekTargetSec = null;
+        const v = getMainVideoElement();
+        const a = StudioEngine774.audio;
+        if (v && a && StudioEngine774.isActive) {
+          StudioEngine774._isAudioBuffering = false;
+          StudioEngine774._audioStalledAt = 0;
+          if (!v.paused && a.paused && !StudioEngine774._userPaused && !StudioEngine774.isAdActive()) {
+            StudioEngine774._tryPlayAudio();
+          }
+        }
       }
     },
 
@@ -1937,6 +2046,7 @@
         redirectCount: 0,
         lastAppendedSeq: -1,
         lastContigEndMs: 0,
+        seekTargetSec: null,
         durationSec,
         abortCtrl: null,
         timer: null,
@@ -1965,22 +2075,41 @@
             const v = getMainVideoElement();
             const a = StudioEngine774.audio;
             const cur = getVideoTimeFor(session.videoId);
-            const cov = this.getBufferedEndFor(sb, cur);
-            if (cov !== null) {
-              if (v && a && StudioEngine774.isActive) {
-                const audioCov = this.getBufferedEndFor(sb, a.currentTime);
-                // Only align audio.currentTime on initial segment or when audio is outside buffered range (e.g. after seek).
-                // NEVER seek audio while it is actively playing inside a valid buffered range!
-                if ((!session.initialSyncDone || audioCov === null) && !a.seeking) {
+            if (v && a && StudioEngine774.isActive) {
+              const strictAudio = this.getStrictBufferedRange(sb, a.currentTime);
+              const strictVideo = this.getStrictBufferedRange(sb, cur);
+              // Align audio.currentTime on initial segment or when audio is outside strict buffered range (e.g. after seek
+              // or when SABR cluster boundary starts slightly ahead of the requested seek target).
+              if (!session.initialSyncDone || strictAudio === null) {
+                if (strictVideo !== null) {
                   session.initialSyncDone = true;
-                  if (cur > 0.8 || audioCov === null) {
+                  session.seekTargetSec = null;
+                  if (cur > 0.8 || strictAudio === null) {
                     try { a.currentTime = cur; } catch (e) {}
                   }
-                }
-                if (!v.paused && a.paused && !StudioEngine774.isAdActive()) {
-                  a.play().catch(() => {});
+                } else {
+                  const minRef = Math.min(cur, !isNaN(a.currentTime) ? a.currentTime : cur);
+                  const maxRef = Math.max(cur, !isNaN(a.currentTime) ? a.currentTime : cur) + 5.5;
+                  const fwd = this.findNearestForwardBufferedRange(sb, minRef, maxRef);
+                  if (fwd) {
+                    session.initialSyncDone = true;
+                    session.seekTargetSec = null;
+                    const snapTarget = (cur >= fwd.start && cur < fwd.end - 0.05) ? cur : (fwd.start + 0.02);
+                    try { a.currentTime = snapTarget; } catch (e) {}
+                  }
                 }
               }
+              const postAudioCov = this.getStrictBufferedRange(sb, a.currentTime);
+              if (postAudioCov !== null) {
+                StudioEngine774._isAudioBuffering = false;
+                StudioEngine774._audioStalledAt = 0;
+                if (!v.paused && a.paused && !StudioEngine774._userPaused && !StudioEngine774.isAdActive()) {
+                  StudioEngine774._tryPlayAudio();
+                }
+              }
+            }
+            const cov = (a ? this.getBufferedEndFor(sb, a.currentTime) : null) ?? this.getBufferedEndFor(sb, cur);
+            if (cov !== null) {
               report();
               // Pre-buffer up to 25s ahead immediately after initial segment arrives
               if (cov - cur < 18.0 && !session.inFlight && !session.reachedEof) {
@@ -2038,6 +2167,8 @@
     _userVol: initialVolState.volume,
     _userMuted: false,
     _userPaused: false,
+    _pauseLockedAt: 0,
+    _pauseLockSource: null,
     _pauseLockUntil: 0,
     _pauseReassert: null,
     _pauseLockVid: null,
@@ -2050,6 +2181,8 @@
       this._locking = true;
       try {
         this._userPaused = true;
+        this._pauseLockedAt = Date.now();
+        this._pauseLockSource = window.__ytssPauseGesture?.source || null;
         this._pauseLockUntil = Date.now() + 60000;
         this._pauseLockVid = (typeof this.currentPlaybackVid === 'function' && this.currentPlaybackVid())
           || (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null)
@@ -2073,6 +2206,8 @@
     },
     unlockPlay() {
       this._userPaused = false;
+      this._pauseLockedAt = 0;
+      this._pauseLockSource = null;
       this._pauseLockUntil = 0;
       this._pauseLockVid = null;
       if (this._pauseReassert) {
@@ -2107,6 +2242,9 @@
     _isInternalVideoSync: false,
     _isTabResyncing: false,
     _isSeeking: false,
+    _seekingStartedAt: 0,
+    _isTimelineScrubbing: false,
+    _timelineScrubUntil: 0,
     _seekDebounceTimer: null,
     _waitingPauseTimer: null,
     _advanceFallbackTimer: null,
@@ -2170,6 +2308,16 @@
 
     hasRecentUserSeekIntent() {
       return (Date.now() - (this._lastUserSeekIntentAt || 0)) < 2500;
+    },
+
+    isSeekInProgress() {
+      const v = getMainVideoElement();
+      return Boolean(
+        this._isSeeking ||
+        this._isTimelineScrubbing ||
+        Date.now() < (this._timelineScrubUntil || 0) ||
+        (v && v.seeking)
+      );
     },
 
     isInTransitionWindow() {
@@ -2301,10 +2449,12 @@
               this._silenceElement(video);
               this.logSteadyVolumeState('playing');
               const playerVid = document.getElementById('movie_player')?.getVideoData?.()?.video_id;
-              // Align silent video to master audio clock if video drifted while audio was buffering
-              if ((!playerVid || playerVid === this.activeVideoId) && !video.seeking && !this._isSeeking && !this._isInternalVideoSync) {
+              // Align silent video to master audio clock if video drifted while audio was buffering.
+              // Never yank video back to old audio position during/shortly after a seek or large jump (>1.5s)!
+              const canResyncVideoOnPlay = (Date.now() - (this._lastSeekTime || 0) > 3000) && !this.audio.seeking && !this._trackEnded;
+              if ((!playerVid || playerVid === this.activeVideoId) && !video.seeking && !this._isSeeking && !this._isInternalVideoSync && canResyncVideoOnPlay) {
                 const diff = Math.abs(video.currentTime - this.audio.currentTime);
-                if (diff > 0.40 && this.isTimeBuffered(video, this.audio.currentTime)) {
+                if (diff > 0.40 && diff <= 1.5 && this.isTimeBuffered(video, this.audio.currentTime)) {
                   this._isInternalVideoSync = true;
                   try { video.currentTime = this.audio.currentTime; } catch (e) {}
                   setTimeout(() => { this._isInternalVideoSync = false; }, 250);
@@ -2722,10 +2872,10 @@
       const markPointerIntent = (e) => {
         const t = e.target;
         if (!t || typeof t.closest !== 'function') return;
-        if (t.closest('.ytp-mute-button, .ytp-volume-panel, .ytp-volume-area, .ytp-volume-slider, .ytp-volume-slider-handle, .ytp-volume-icon, [class*="volume"]')) {
+        if (t.closest('.ytp-mute-button, .ytp-volume-panel, .html5-volume-panel, .ytp-volume-area, .ytp-volume-slider, .ytp-volume-slider-handle, .ytp-volume-icon, [class*="volume"]')) {
           this._lastUserMuteOrVolIntentAt = Date.now();
         }
-        if (t.closest('.ytp-progress-bar, .ytp-progress-bar-container, .ytp-scrubber-container, .ytp-chapter-container, .ytp-fine-scrubbing-container, a[href*="t="], ytd-macro-markers-list-item-renderer')) {
+        if (t.closest('.ytp-progress-bar, .html5-progress-bar, .ytp-progress-bar-container, .html5-progress-bar-container, .ytp-scrubber-container, .html5-scrubber-button, .ytp-chapter-container, .ytp-fine-scrubbing-container, [class*="progress-bar"], [class*="scrubber"], a[href*="t="], ytd-macro-markers-list-item-renderer')) {
           this._lastUserSeekIntentAt = Date.now();
         }
       };
@@ -2800,8 +2950,15 @@
 
         // 1. Seeking & Seeked — Process BEFORE document.hidden check so background seeking works!
         if (e.type === 'seeking') {
-          if (this._isVolScrubbing || this._isInternalVideoSync || this._isTabResyncing) return;
+          if (this._isInternalVideoSync || this._isTabResyncing) return;
+          if (this._userPaused && this._pauseLockSource === 'pointer' && (window.__ytssPointerDown || (this._pauseLockedAt && (Date.now() - this._pauseLockedAt) < 200))) {
+            // Player paused video during pointer-driven timeline scrub start — not a standalone user pause
+            this._isTimelineScrubbing = true;
+            this._timelineScrubUntil = Date.now() + 1500;
+            this.unlockPlay();
+          }
           this._isSeeking = true;
+          this._seekingStartedAt = Date.now();
           this._lastSeekTime = Date.now();
           this._hasDispatchedEnded = false;
           if (!this.isAdActive()) {
@@ -2812,12 +2969,18 @@
         }
 
         if (e.type === 'seeked') {
-          if (this._isVolScrubbing || this._isInternalVideoSync || this._isTabResyncing) return;
+          if (this._isInternalVideoSync || this._isTabResyncing) return;
+          if (this._userPaused && this._pauseLockSource === 'pointer' && (window.__ytssPointerDown || (this._pauseLockedAt && (Date.now() - this._pauseLockedAt) < 200))) {
+            this._isTimelineScrubbing = true;
+            this._timelineScrubUntil = Date.now() + 1500;
+            this.unlockPlay();
+          }
           if (this._seekDebounceTimer) {
             clearTimeout(this._seekDebounceTimer);
             this._seekDebounceTimer = null;
           }
           this._isSeeking = false;
+          this._seekingStartedAt = 0;
           this._hasDispatchedEnded = false;
 
           const vTargetSec = getVideoTimeFor(this.activeVideoId);
@@ -2827,8 +2990,8 @@
             console.log(TAG, '[StudioEngine774] Native video looped back to start -> Resetting 774 audio to 0:00');
             this._trackEnded = false;
             this.audio.currentTime = vTargetSec;
-            if (this.audio.paused) {
-              this.audio.play().catch(() => {});
+            if (this.audio.paused && !this._userPaused) {
+              this._tryPlayAudio();
             }
             return;
           }
@@ -2851,8 +3014,8 @@
               }
             }
             this.audio.playbackRate = video.playbackRate;
-            if (!video.paused && this.audio.paused) {
-              this.audio.play().catch(() => {});
+            if (!video.paused && !this._userPaused && this.audio.paused) {
+              this._tryPlayAudio();
             }
           }
           return;
@@ -3013,7 +3176,12 @@
           if (pState === 3) {
             return;
           }
-          if (this._isInternalVideoSync || this._isSeeking) return;
+          if (this._isInternalVideoSync || this._isSeeking || this.isSeekInProgress()) {
+            if (!this._userPaused && this.audio && !this.audio.paused) {
+              try { this.audio.pause(); } catch (e) {}
+            }
+            return;
+          }
           const g = window.__ytssPauseGesture;
           const userPauseIntent = g && !g.wasPaused && !fsBusy() && (Date.now() - g.at) < 450;
           // Only sticky-lock on user pause. Engine/MSE pause events otherwise
@@ -3135,7 +3303,13 @@
           const origPauseVideo = player.pauseVideo.bind(player);
           const origPlayVideo = typeof player.playVideo === 'function' ? player.playVideo.bind(player) : null;
           player.pauseVideo = (...a) => {
-            if (S.enabled) this.lockPause();
+            if (S.enabled) {
+              if (!this.isSeekInProgress() || this._userPaused) {
+                this.lockPause();
+              } else if (this.audio && !this.audio.paused) {
+                try { this.audio.pause(); } catch (e) {}
+              }
+            }
             return origPauseVideo(...a);
           };
           if (origPlayVideo) {
@@ -3253,8 +3427,14 @@
           if (!S.enabled) return;
           if (state === 2) {
             // YT paused (UI button / space / media session through player)
-            // Ignore state 2 noise during fullscreen transitions.
-            if (!fsBusy()) this.lockPause();
+            // Ignore state 2 noise during fullscreen transitions or timeline seek/scrub.
+            if (!fsBusy()) {
+              if (!this.isSeekInProgress() || this._userPaused) {
+                this.lockPause();
+              } else if (this.audio && !this.audio.paused) {
+                try { this.audio.pause(); } catch (e) {}
+              }
+            }
             return;
           }
           // state 1/3 can be fired by V3 auto-resume — never unlock here.
@@ -3368,14 +3548,6 @@
 
       if (!player._ytssMethodsHooked && typeof player.setVolume === 'function') {
         player._ytssMethodsHooked = true;
-
-        const origSeekTo = player.seekTo;
-        if (typeof origSeekTo === 'function') {
-          player.seekTo = (...args) => {
-            if (S.enabled) this._lastUserSeekIntentAt = Date.now();
-            return origSeekTo.apply(player, args);
-          };
-        }
 
         const origSetVol = player.setVolume;
         player.setVolume = (v) => {
@@ -3668,7 +3840,9 @@
 
     syncVolDirect(v) {
       if (!this.isActive || !this.audio) return;
-      this._markVolScrubbing();
+      if (this.hasRecentUserMuteOrVolIntent()) {
+        this._markVolScrubbing();
+      }
       if (this.isAdActive()) return;
       const numV = (typeof v === 'number' && !isNaN(v)) ? Math.max(0, Math.min(1.0, v)) : 1.0;
       this._userVol = numV;
@@ -3968,7 +4142,15 @@
         return;
       }
 
+      if (this._isSeeking && !video.seeking && (Date.now() - (this._seekingStartedAt || this._lastSeekTime || 0)) > 1200) {
+        this._isSeeking = false;
+        this._seekingStartedAt = 0;
+      }
       if (video.seeking || this._isInternalVideoSync || this._isSeeking) return;
+      if (this._isAudioBuffering && this.audio.readyState >= 3 && !this.audio.seeking) {
+        this._isAudioBuffering = false;
+        this._audioStalledAt = 0;
+      }
 
       if (video.paused) {
         if (video.ended) {
@@ -4061,6 +4243,45 @@
       const vTime = video.currentTime;
       const aTime = this.audio.currentTime;
 
+      // 0d. MSE / Opus cluster boundary gap rescue:
+      // If <audio> is stuck seeking/buffering in a tiny unbuffered gap just before an already-buffered MSE cluster,
+      // snap audio into the buffered range immediately so playback resumes without needing user interaction.
+      if ((this.audio.seeking || this._isAudioBuffering || this.audio.readyState < 3) && this.audio.buffered && this.audio.buffered.length > 0) {
+        try {
+          const b = this.audio.buffered;
+          let strictlyCovered = false;
+          let forwardStart = null;
+          let forwardEnd = null;
+          for (let i = 0; i < b.length; i++) {
+            const s = b.start(i);
+            const e = b.end(i);
+            if (aTime >= s - 0.05 && aTime <= e - 0.05) {
+              strictlyCovered = true;
+              break;
+            }
+            if (e - s >= 0.08 && s > aTime - 0.05 && s <= Math.max(vTime, aTime) + 5.5) {
+              if (forwardStart === null || s < forwardStart) {
+                forwardStart = s;
+                forwardEnd = e;
+              }
+            }
+          }
+          if (!strictlyCovered && forwardStart !== null) {
+            const snapTarget = (vTime >= forwardStart && vTime < forwardEnd - 0.05) ? vTime : (forwardStart + 0.02);
+            console.log(TAG, `[StudioEngine774 Watchdog] Snapping audio across cluster gap ${aTime.toFixed(2)}s -> ${snapTarget.toFixed(2)}s (buffered ${forwardStart.toFixed(2)}s..${forwardEnd.toFixed(2)}s)`);
+            this.audio.currentTime = snapTarget;
+            this._isAudioBuffering = false;
+            this._audioStalledAt = 0;
+            if (!video.paused && this.audio.paused && !this._userPaused) {
+              this._tryPlayAudio();
+            }
+            this._lastAudioTime = snapTarget;
+            this._lastAudioAdvance = Date.now();
+            return;
+          }
+        } catch (e) {}
+      }
+
       // 1. Detect frozen / stalled audio stream (not merely buffering)
       if (Math.abs(aTime - this._lastAudioTime) < 0.05 && !this.audio.paused && !this._trackEnded) {
         const stalledDuration = Date.now() - (this._lastAudioAdvance || Date.now());
@@ -4148,7 +4369,7 @@
       if (!this.audio) return false;
 
       // If already active and playing 774 for this exact video without error, NEVER reload/rewind!
-      if (this.isActive && this.activeVideoId === videoId && this.audio && this.audio.src && !this.audio.error) {
+      if (this.isActive && this.activeVideoId === videoId && this.audio && this.audio.src === streamUrl && !this.audio.error) {
         this.syncVol(mainVideo);
         return true;
       }
@@ -4267,7 +4488,7 @@
       if (!streamUrl) return false;
 
       // If already active and playing 774 for this exact video without error, do not reload/rewind!
-      if (this.isActive && this.activeVideoId === videoId && this.audio && this.audio.src && !this.audio.error) {
+      if (this.isActive && this.activeVideoId === videoId && this.audio && this.audio.src === streamUrl && !this.audio.error) {
         this.updateNormalizedGain(videoId);
         const mainVideo = getMainVideoElement();
         if (mainVideo) this.syncVol(mainVideo);
@@ -4340,6 +4561,9 @@
       this._reconnectAttempts = 0;
       this._isAudioBuffering = false;
       this._isSeeking = false;
+      this._seekingStartedAt = 0;
+      this._isTimelineScrubbing = false;
+      this._timelineScrubUntil = 0;
       // Clear pause lock + reassert interval (do not leave the 150ms timer running)
       this.unlockPlay();
       this._hasDispatchedEnded = false;
