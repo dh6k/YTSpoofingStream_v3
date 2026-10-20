@@ -122,6 +122,7 @@
       if (typeof StudioEngine774 !== 'undefined') StudioEngine774.stopAndUnmute('Extension Disabled');
       const container = document.getElementById('ytss-vol-container');
       if (container) container.style.display = 'none';
+      if (typeof PlayerBadgeUI !== 'undefined') PlayerBadgeUI.inject();
       if (typeof applyAudioOnlyState === 'function') applyAudioOnlyState();
       status.activeMethod = 'original';
       status.activeAudioItag = 251;
@@ -131,8 +132,10 @@
     } else {
       const wasDisabled = !lastEnabled;
       lastEnabled = true;
+      if (typeof StudioEngine774 !== 'undefined') StudioEngine774.init();
       const container = document.getElementById('ytss-vol-container');
       if (container) container.style.display = 'inline-flex';
+      if (typeof PlayerBadgeUI !== 'undefined') PlayerBadgeUI.inject();
       if (typeof applyAudioOnlyState === 'function') applyAudioOnlyState();
       if (typeof StudioEngine774 !== 'undefined' && StudioEngine774.isActive) {
         StudioEngine774.updateNormalizedGain(StudioEngine774.activeVideoId);
@@ -852,6 +855,9 @@
   try {
     Object.defineProperty(HTMLMediaElement.prototype, 'volume', {
       get() {
+        if (!S.enabled) {
+          return descVolume.get.call(this);
+        }
         if (typeof StudioEngine774 !== 'undefined' && this === StudioEngine774.audio) {
           return descVolume.get.call(this);
         }
@@ -877,6 +883,10 @@
         return descVolume.get.call(this);
       },
       set(v) {
+        if (!S.enabled) {
+          try { descVolume.set.call(this, v); } catch (e) {}
+          return;
+        }
         if (typeof StudioEngine774 !== 'undefined' && this === StudioEngine774.audio) {
           return descVolume.set.call(this, v);
         }
@@ -931,6 +941,9 @@
   try {
     Object.defineProperty(HTMLMediaElement.prototype, 'muted', {
       get() {
+        if (!S.enabled) {
+          return descMuted.get.call(this);
+        }
         if (typeof StudioEngine774 !== 'undefined' && this === StudioEngine774.audio) {
           return descMuted.get.call(this);
         }
@@ -951,6 +964,10 @@
         return descMuted.get.call(this);
       },
       set(m) {
+        if (!S.enabled) {
+          try { descMuted.set.call(this, !!m); } catch (e) {}
+          return;
+        }
         if (typeof StudioEngine774 !== 'undefined' && this === StudioEngine774.audio) {
           return descMuted.set.call(this, m);
         }
@@ -1010,6 +1027,9 @@
   window.__ytssPauseGesture = { at: 0, wasPaused: true };
 
   HTMLMediaElement.prototype.play = function(...args) {
+    if (!S.enabled) {
+      return origPlay.apply(this, args);
+    }
     const eng = (typeof StudioEngine774 !== 'undefined') ? StudioEngine774 : null;
     if (eng) {
       const isEngAudio = this === eng.audio;
@@ -1050,25 +1070,24 @@
   // Pause interceptor. Only arm the sticky lock on real user-intent pause.
   // Engine/MSE pause() calls must not start a 150ms fight with play() (icon flicker).
   HTMLMediaElement.prototype.pause = function(...args) {
+    if (!S.enabled) {
+      return origPause.apply(this, args);
+    }
     try {
       if (typeof StudioEngine774 !== 'undefined' && StudioEngine774.isActive && !StudioEngine774.isAdActive()) {
-        const isEngineAudio = this === StudioEngine774.audio;
+        if (this === StudioEngine774.audio) {
+          return origPause.apply(this, args);
+        }
         const isMainVideo = this !== StudioEngine774.audio &&
           ((this.classList && this.classList.contains('html5-main-video')) ||
            (this.closest && this.closest('#movie_player, .html5-video-player')));
-        if (isEngineAudio || isMainVideo) {
+        if (isMainVideo) {
           const g = window.__ytssPauseGesture;
           const userPauseIntent = g && !g.wasPaused && !fsBusy() && (Date.now() - g.at) < 450;
           if (userPauseIntent && typeof StudioEngine774.lockPause === 'function') {
             StudioEngine774.lockPause();
-          } else if (!StudioEngine774._userPaused) {
-            // Non-user pause (buffer/seek/MSE): park the sibling only, no sticky lock.
-            const other = isEngineAudio ? getMainVideoElement() : StudioEngine774.audio;
-            if (other && !other.paused) {
-              try { origPause.call(other); } catch (e) {}
-            }
           }
-          const other = isEngineAudio ? getMainVideoElement() : StudioEngine774.audio;
+          const other = StudioEngine774.audio;
           if (other && !other.paused) {
             try { origPause.call(other); } catch (e) {}
           }
@@ -2171,6 +2190,7 @@
     },
 
     init() {
+      if (!S.enabled) return;
       if (!this.audio) {
         this.audio = document.createElement('audio');
         this.audio.id = 'ytss-studio-774';
@@ -2497,7 +2517,7 @@
     },
 
     _silenceElement(el) {
-      if (!el || el === this.audio || (!this.isActive && !this._isTransitioning) || this.isAdActive()) return;
+      if (!S.enabled || !el || el === this.audio || (!this.isActive && !this._isTransitioning) || this.isAdActive()) return;
       this.hookVideoVolume(el);
       try {
         if (descVolume.get.call(el) !== 0) {
@@ -2513,7 +2533,7 @@
     },
 
     hookVideoVolume(video) {
-      if (!video || video._ytssVolHooked) return;
+      if (!S.enabled || !video || video._ytssVolHooked) return;
       video._ytssVolHooked = true;
       try {
         const rawV = descVolume.get.call(video);
@@ -2529,6 +2549,9 @@
       try {
         Object.defineProperty(video, 'volume', {
           get() {
+            if (!S.enabled) {
+              return descVolume.get.call(this);
+            }
             if (StudioEngine774.isActive || StudioEngine774._isTransitioning) {
               if (typeof this._userVol === 'number' && !isNaN(this._userVol)) {
                 return this._userVol;
@@ -2540,6 +2563,10 @@
             return descVolume.get.call(this);
           },
           set(v) {
+            if (!S.enabled) {
+              try { descVolume.set.call(this, v); } catch (e) {}
+              return;
+            }
             const numV = (typeof v === 'number' && !isNaN(v)) ? Math.max(0, Math.min(1.0, v)) : 1.0;
             const userVol = StudioEngine774.resolveRawUserVolume(numV);
             StudioEngine774._lastUserMuteOrVolIntentAt = Date.now();
@@ -2570,12 +2597,19 @@
       try {
         Object.defineProperty(video, 'muted', {
           get() {
+            if (!S.enabled) {
+              return descMuted.get.call(this);
+            }
             if (StudioEngine774.isActive || StudioEngine774._isTransitioning) {
               return Boolean(StudioEngine774._userMuted);
             }
             return descMuted.get.call(this);
           },
           set(m) {
+            if (!S.enabled) {
+              try { descMuted.set.call(this, !!m); } catch (e) {}
+              return;
+            }
             let targetMuted = !!m;
             if (!this.isConnected) {
               this._userMuted = targetMuted;
@@ -2615,6 +2649,7 @@
     },
 
     silenceNativeVideo(video) {
+      if (!S.enabled) return;
       if (video) {
         this._silenceElement(video);
         return;
@@ -2629,9 +2664,19 @@
     restoreNativeVideo(video) {
       const restore = (v) => {
         if (!v || v === this.audio) return;
+        const p = document.getElementById('movie_player');
+        let pVol = null;
+        if (p && typeof p.getVolume === 'function') {
+          try {
+            const pv = p.getVolume();
+            if (typeof pv === 'number' && !isNaN(pv) && pv > 0) pVol = Math.min(1.0, pv / 100);
+          } catch (e) {}
+        }
         const savedVol = (typeof v._userVol === 'number' && !isNaN(v._userVol) && v._userVol > 0)
           ? v._userVol
-          : (this._userVol || 1.0);
+          : ((typeof this._userVol === 'number' && !isNaN(this._userVol) && this._userVol > 0)
+              ? this._userVol
+              : (pVol || readStoredYoutubeVolumeState().volume || 1.0));
         const isMuted = Boolean(this._userMuted);
 
         delete v._ytssVolHooked;
@@ -2645,7 +2690,6 @@
           try { descVolume.set.call(v, isMuted ? 0 : savedVol); } catch (e) {}
         }
 
-        const p = document.getElementById('movie_player');
         if (p && typeof p.unMute === 'function' && !isMuted && p.isMuted()) {
           try { p.unMute(); } catch (e) {}
         }
@@ -2705,6 +2749,7 @@
 
       // HTML5 video events do not bubble, so we capture them at the document root
       const onVideoEvent = (e) => {
+        if (!S.enabled) return;
         if (!e.target || e.target.tagName !== 'VIDEO' || e.target.id === 'ytss-studio-774') return;
         const video = e.target;
         // Ignore hover thumbnail previews on home/feed pages
@@ -3006,28 +3051,34 @@
     },
 
     hookVideo(video) {
-      if (!video || this._hookedVideos.has(video)) return;
-      this._hookedVideos.add(video);
-      try {
-        video.addEventListener('loadstart', () => {
-          // New media load = new playback context. Always drop pause lock so
-          // click-to-play / autoplay after a pause is never swallowed.
-          if (this._userPaused) this.unlockPlay();
+      if (!video || !S.enabled) return;
+      if (!this._hookedVideos.has(video)) {
+        this._hookedVideos.add(video);
+        try {
+          video.addEventListener('loadstart', () => {
+            if (!S.enabled) return;
+            // New media load = new playback context. Always drop pause lock so
+            // click-to-play / autoplay after a pause is never swallowed.
+            if (this._userPaused) this.unlockPlay();
+          }, { passive: true });
+          video.addEventListener('emptied', () => {
+            if (!S.enabled) return;
+            if (this._userPaused) this.unlockPlay();
+          }, { passive: true });
+        } catch (e) {}
+        video.addEventListener('timeupdate', () => {
+          if (!S.enabled) return;
+          if (typeof NextVideoManager !== 'undefined') {
+            NextVideoManager.tick();
+          }
         }, { passive: true });
-        video.addEventListener('emptied', () => {
-          if (this._userPaused) this.unlockPlay();
-        }, { passive: true });
-      } catch (e) {}
+      }
       this.hookVideoVolume(video);
-      video.addEventListener('timeupdate', () => {
-        if (typeof NextVideoManager !== 'undefined') {
-          NextVideoManager.tick();
-        }
-      }, { passive: true });
       this.hookPlayer();
     },
 
     hookPlayer() {
+      if (!S.enabled) return;
       const player = document.getElementById('movie_player');
       if (!player) return;
 
@@ -3035,6 +3086,7 @@
         player._ytssEventsHooked = true;
 
         const handleVolumeChange = (data) => {
+          if (!S.enabled) return;
           let isMuted = data ? !!data.muted : (typeof player.isMuted === 'function' && player.isMuted());
           let vol = (typeof this._userVol === 'number' && !isNaN(this._userVol)) ? this._userVol : 1.0;
           if (data && typeof data.volume === 'number' && !isNaN(data.volume)) {
@@ -3083,7 +3135,7 @@
           const origPauseVideo = player.pauseVideo.bind(player);
           const origPlayVideo = typeof player.playVideo === 'function' ? player.playVideo.bind(player) : null;
           player.pauseVideo = (...a) => {
-            this.lockPause();
+            if (S.enabled) this.lockPause();
             return origPauseVideo(...a);
           };
           if (origPlayVideo) {
@@ -3099,7 +3151,7 @@
         try {
           if (navigator.mediaSession && typeof navigator.mediaSession.setActionHandler === 'function') {
             navigator.mediaSession.setActionHandler('pause', () => {
-              this.lockPause();
+              if (S.enabled) this.lockPause();
               try { player.pauseVideo?.(); } catch (e) {}
               if (this.audio && !this.audio.paused) {
                 try { this.audio.pause(); } catch (e) {}
@@ -3122,6 +3174,7 @@
 
         let isPlaybackEnded = false;
         const handleVideoDataChange = () => {
+          if (!S.enabled) return;
           const urlVid = (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
           const pVid = player.getVideoData?.()?.video_id || null;
           // During SPA transition, player.getVideoData().video_id often lags on the outgoing track
@@ -3197,6 +3250,7 @@
 
         player.addEventListener('videodatachange', handleVideoDataChange);
         player.addEventListener('onStateChange', (state) => {
+          if (!S.enabled) return;
           if (state === 2) {
             // YT paused (UI button / space / media session through player)
             // Ignore state 2 noise during fullscreen transitions.
@@ -3264,6 +3318,7 @@
 
         // Miniplayer close button click handler
         document.addEventListener('click', (e) => {
+          if (!S.enabled) return;
           const closeMini = e.target?.closest?.('.ytp-miniplayer-close-button, ytd-miniplayer #close-button, ytd-miniplayer button[aria-label="Đóng"], ytd-miniplayer button[aria-label="Close"]');
           if (closeMini) {
             navTargetVideoId = null;
@@ -3272,6 +3327,7 @@
         }, true);
 
         player.addEventListener('onError', (errCode) => {
+          if (!S.enabled) return;
           console.log(TAG, `[StudioEngine774] Player onError: ${errCode} -> pausing 774 audio`);
           if (this.audio && !this.audio.paused) {
             try { this.audio.pause(); } catch (err) {}
@@ -3281,6 +3337,7 @@
 
         // Replay button click handler for ended video replay
         document.addEventListener('click', (e) => {
+          if (!S.enabled) return;
           const replayBtn = e.target?.closest?.('.ytp-play-button, .ytp-replay-button');
           if (replayBtn) {
             // Pause intent must stick even if a later canplay tries to resume 774 audio.
@@ -3315,13 +3372,16 @@
         const origSeekTo = player.seekTo;
         if (typeof origSeekTo === 'function') {
           player.seekTo = (...args) => {
-            this._lastUserSeekIntentAt = Date.now();
+            if (S.enabled) this._lastUserSeekIntentAt = Date.now();
             return origSeekTo.apply(player, args);
           };
         }
 
         const origSetVol = player.setVolume;
         player.setVolume = (v) => {
+          if (!S.enabled) {
+            return origSetVol.call(player, v);
+          }
           this._lastUserMuteOrVolIntentAt = Date.now();
           const numV = (typeof v === 'number' && !isNaN(v)) ? Math.max(0, Math.min(100, v)) : 100;
           if (numV > 0) {
@@ -3355,6 +3415,9 @@
         const origMute = player.mute;
         if (typeof origMute === 'function') {
           player.mute = () => {
+            if (!S.enabled) {
+              return origMute.call(player);
+            }
             this._lastUserMuteOrVolIntentAt = Date.now();
             if (!this._userMuted && (this._isTransitioning || this.isInTransitionWindow())) {
               // Suppress spurious YouTube auto-mute during track switch
@@ -3380,6 +3443,9 @@
         const origUnmute = player.unMute;
         if (typeof origUnmute === 'function') {
           player.unMute = () => {
+            if (!S.enabled) {
+              return origUnmute.call(player);
+            }
             this._lastUserMuteOrVolIntentAt = Date.now();
             this._userMuted = false;
             const mainV = getMainVideoElement();
@@ -3400,6 +3466,7 @@
     },
 
     prepareTransition(newVid) {
+      if (!S.enabled) return;
       if (!newVid || !VIDEO_ID_RE.test(newVid) || window.location.pathname.startsWith('/shorts/')) {
         this.stopAndUnmute('Navigated away from watch page');
         return;
@@ -4069,12 +4136,16 @@
     },
 
     applyToVideo(mainVideo, videoId, best774) {
+      if (!S.enabled) return false;
       if (!isCurrentWatchVideo(videoId)) {
         console.log(TAG, `[StudioEngine774] Rejecting applyToVideo for stale video ${videoId} (current is ${getVideoIdFromUrl()})`);
         return false;
       }
       const streamUrl = cleanStreamUrl(best774.url || best774._directUrl);
       if (!streamUrl) return false;
+
+      if (!this.audio) this.init();
+      if (!this.audio) return false;
 
       // If already active and playing 774 for this exact video without error, NEVER reload/rewind!
       if (this.isActive && this.activeVideoId === videoId && this.audio && this.audio.src && !this.audio.error) {
@@ -4250,10 +4321,11 @@
 
       UmpMseController774.stop();
 
-      if (!this.isActive && !this._isTransitioning && !this.pending774) {
+      const forceDisableCleanup = !S.enabled || reason === 'Extension Disabled';
+      if (!forceDisableCleanup && !this.isActive && !this._isTransitioning && !this.pending774) {
         return; // Already cleanly running native; do not disrupt video!
       }
-      const wasActive = this.isActive || this._isTransitioning;
+      const wasActive = this.isActive || this._isTransitioning || forceDisableCleanup;
       this._isTransitioning = false;
       this._transitionTargetVid = null;
       if (this._transitionSafetyTimer) {
@@ -4289,15 +4361,19 @@
         this._waiterTimer = null;
       }
       if (this.audio) {
-        this.audio.pause();
-        this.audio.removeAttribute('src');
-        this.audio.load();
+        try {
+          this.audio.pause();
+          this.audio.removeAttribute('src');
+          this.audio.load();
+        } catch (e) {}
+        if (forceDisableCleanup) {
+          try { this.audio.remove(); } catch (e) {}
+          this.audio = null;
+        }
       }
       if (wasActive) {
         const mainVideo = getMainVideoElement();
-        if (mainVideo) {
-          this.restoreNativeVideo(mainVideo);
-        }
+        this.restoreNativeVideo(mainVideo);
       }
       const p = document.getElementById('movie_player');
       if (p && typeof p.isMuted === 'function' && p.isMuted() && !this._userMuted) {
@@ -4530,7 +4606,7 @@
     status.prewarmStatus = `pre-fetching ${videoId}…`;
     report();
     fetchAllHQAudio(videoId, opts).then(hqData => {
-      if (hqData?.superseded) return;
+      if (!S.enabled || hqData?.superseded) return;
       if (hqData?.cancelled) {
         if (isCurrentWatchVideo(videoId) && !pendingFetches.has(videoId) && StudioEngine774._isTransitioning && !StudioEngine774.isActive) {
           StudioEngine774.stopAndUnmute('Harvest cancelled or timed out', videoId);
@@ -4587,6 +4663,7 @@
     isInitialPageLoad = false; // We are now in SPA territory, never reload page
     isSpaNavigating = true;
     lastSpaNavStartAt = Date.now();
+    if (!S.enabled) return;
 
     let isShortsNav = Boolean(e?.detail?.endpoint?.reelWatchEndpoint || e?.detail?.command?.reelWatchEndpoint || window.location.pathname.startsWith('/shorts/'));
     let incomingVid = e?.detail?.endpoint?.watchEndpoint?.videoId
@@ -4650,6 +4727,7 @@
 
   window.addEventListener('popstate', () => {
     lastSpaNavStartAt = Date.now();
+    if (!S.enabled) return;
     const currentVid = getVideoIdFromUrl();
     if (!currentVid) {
       if ((StudioEngine774.isActive || StudioEngine774._isTransitioning) && !isPlayerActiveOnPage()) {
@@ -6951,12 +7029,13 @@
 
   ['DOMContentLoaded', 'yt-navigate-finish', 'yt-page-data-updated'].forEach(evt => {
     document.addEventListener(evt, () => {
-      StudioEngine774.init();
-      StatsForNerdsSpoofer.init();
       PlayerBadgeUI.inject();
       // Burst inject so the chips land with the bar, not 1.5s later
       [0, 50, 150, 400, 900].forEach((ms) => setTimeout(() => PlayerBadgeUI.inject(), ms));
       applyAudioOnlyState();
+      if (!S.enabled) return;
+      StudioEngine774.init();
+      StatsForNerdsSpoofer.init();
       const currentVid = getVideoIdFromUrl();
       const pLoudness = window.ytInitialPlayerResponse?.playerConfig?.audioConfig?.loudnessDb
         ?? document.getElementById('movie_player')?.getPlayerResponse?.()?.playerConfig?.audioConfig?.loudnessDb;
