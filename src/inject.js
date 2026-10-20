@@ -1348,6 +1348,13 @@
     return [(u8[pos + 1] | (u8[pos + 2] << 8) | (u8[pos + 3] << 16) | (u8[pos + 4] << 24)) >>> 0, pos + 5];
   }
 
+  // Lever 4 (A-refine-playback): SABR URL decipher cache.
+  // UmpMseController774 already caches the deciphered URL per session (session.decipheredUrl),
+  // so repeated seeks do not decipher again. This module-level map additionally survives a
+  // re-attach / hybrid failover (new session, same serverAbrStreamingUrl) within the TTL.
+  const SABR_DECIPHER_CACHE = new Map(); // raw serverAbrStreamingUrl -> { url, ts }
+  const SABR_DECIPHER_TTL_MS = 3600000;
+
   var UmpMseController774 = {
     session: null,
     isActive: false,
@@ -1521,6 +1528,11 @@
       if (session.decipheredUrl) return session.decipheredUrl;
       const rawUrl = session.tvCtx?.serverAbrStreamingUrl;
       if (!rawUrl) return null;
+      const cachedDeciphered = SABR_DECIPHER_CACHE.get(rawUrl);
+      if (cachedDeciphered && (Date.now() - cachedDeciphered.ts) < SABR_DECIPHER_TTL_MS) {
+        session.decipheredUrl = cachedDeciphered.url;
+        return cachedDeciphered.url;
+      }
       const origN = this._extractOrigN(rawUrl);
       if (!origN) {
         session.decipheredUrl = rawUrl;
@@ -1530,6 +1542,7 @@
       let dec = this.decipherSabrUrl(rawUrl);
       if (dec) {
         session.decipheredUrl = dec;
+        SABR_DECIPHER_CACHE.set(rawUrl, { url: dec, ts: Date.now() });
         return dec;
       }
 
@@ -1569,6 +1582,7 @@
 
       if (dec) {
         session.decipheredUrl = dec;
+        SABR_DECIPHER_CACHE.set(rawUrl, { url: dec, ts: Date.now() });
         return dec;
       }
       return rawUrl;
@@ -1940,11 +1954,59 @@
       }
     },
 
+    // Lever 1 (A-refine-playback): speculative prefetch of the cluster for a likely seek
+    // target, started on the native `seeking` event / while the user scrubs or hovers the
+    // timeline — instead of waiting for `seeked` (which the native <video> can delay by
+    // 100-300ms). The later `seeked` dispatch is deduped in onSeek(), so the in-flight
+    // request is NOT aborted and refetched.
+    prefetchSeek(targetSec, opts = {}) {
+      const session = this.session;
+      if (!session || session.aborted || !this.isActive || !session.sourceBuffer) return false;
+      if (typeof targetSec !== 'number' || !isFinite(targetSec) || targetSec < 0) return false;
+      if (!session.hasInit) return false;
+      if (this.getStrictBufferedRange(session.sourceBuffer, targetSec) !== null) return false;
+      if (opts.protectPlayback) {
+        // Hover-only prefetch must never starve the playing buffer: divert the pump only
+        // while >= 8s of contiguous audio is still buffered ahead of the playhead.
+        const v = getMainVideoElement();
+        const a = StudioEngine774.audio;
+        const cur = v ? getVideoTimeFor(session.videoId) : 0;
+        const fromSec = Math.max(0, (a && !isNaN(a.currentTime) ? a.currentTime : cur) - 0.5);
+        const end = this.getBufferedEndFor(session.sourceBuffer, fromSec);
+        const ahead = end === null ? 0 : end - Math.max(fromSec, cur);
+        if (!(ahead >= 8.0)) return false;
+      }
+      this.onSeek(targetSec);
+      return true;
+    },
+
+    // Maps a pointer position on the timeline bar to a time and prefetches it.
+    prefetchFromTimeline(clientX, barRect, durationSec) {
+      if (typeof clientX !== 'number' || !isFinite(clientX)) return false;
+      if (!barRect || !(barRect.width > 20) || !(durationSec > 0)) return false;
+      const frac = Math.min(1, Math.max(0, (clientX - barRect.left) / barRect.width));
+      const sec = frac * durationSec;
+      if (!(sec > 0)) return false;
+      return this.prefetchSeek(sec, { protectPlayback: true });
+    },
+
     onSeek(targetSec) {
       const session = this.session;
       if (!session || session.aborted || !this.isActive || !session.sourceBuffer) return;
       const strictCov = this.getStrictBufferedRange(session.sourceBuffer, targetSec);
       if (strictCov === null) {
+        // Dedupe (lever 1): one user seek is dispatched twice when prefetch-on-`seeking` is
+        // active — the early prefetch and the native `seeked` handler. Keep the in-flight
+        // request for this exact target instead of aborting and refetching it (a refetch
+        // would add a second full SABR round-trip to the audible stall).
+        const pendingTarget = session.seekTargetSec;
+        if (typeof pendingTarget === 'number' &&
+            Math.abs(pendingTarget - targetSec) <= 0.35 &&
+            (session.inFlight || session.appendQueue.length > 0)) {
+          session.seekAudioResyncUntil = Date.now() + 4000;
+          this.scheduleAudioResync(session);
+          return;
+        }
         // Target seek time is outside strict MSE buffer -> supersede any in-flight fetch and pump immediately!
         // Bump the generation first: whatever the superseded request returns must not clear seekTargetSec,
         // update lastAppendedSeq/lastContigEndMs, or append a stale cluster for the old position.
@@ -2975,6 +3037,29 @@
         document.addEventListener(evt, markPointerIntent, { capture: true, passive: true });
       });
 
+      // Lever 1: scrub/hover prefetch. While the pointer is over the timeline (hovering
+      // before a click, or dragging the scrubber), prefetch the cluster for the position
+      // under the cursor so the eventual release seek is already buffered. Throttled and
+      // playback-protected (prefetchSeek({ protectPlayback: true })).
+      let lastTimelinePrefetchAt = 0;
+      const onTimelineHover = (e) => {
+        if (!S.enabled || document.hidden) return;
+        if (!UmpMseController774.isActive || !StudioEngine774.isActive) return;
+        const t = e.target;
+        if (!t || typeof t.closest !== 'function') return;
+        const bar = t.closest('.ytp-progress-bar, .html5-progress-bar, .ytp-progress-bar-container, .html5-progress-bar-container, .ytp-scrubber-container, .html5-scrubber-button');
+        if (!bar || typeof bar.getBoundingClientRect !== 'function') return;
+        const now = Date.now();
+        if (now - lastTimelinePrefetchAt < 180) return;
+        const video = getMainVideoElement();
+        if (!video || !(video.duration > 0)) return;
+        lastTimelinePrefetchAt = now;
+        try {
+          UmpMseController774.prefetchFromTimeline(e.clientX, bar.getBoundingClientRect(), video.duration);
+        } catch (err) {}
+      };
+      document.addEventListener('pointermove', onTimelineHover, { capture: true, passive: true });
+
       document.addEventListener('keydown', (e) => {
         const tag = e.target?.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
@@ -3053,9 +3138,20 @@
           this._seekingStartedAt = Date.now();
           this._lastSeekTime = Date.now();
           this._hasDispatchedEnded = false;
+          // Lever 1: start the SABR fetch for the seek target NOW, not on `seeked`. The
+          // native video can spend 100-300ms settling before firing `seeked`; that time is
+          // free network head start. onSeek() dedupes the later `seeked` dispatch.
+          this._rateCorrection = 1.0;
+          this._rateCorrectionUntil = 0;
           if (!this.isAdActive()) {
             this._silenceElement(video);
             this.syncVol(video);
+            if (UmpMseController774.isActive) {
+              const prefetchTarget = getVideoTimeFor(this.activeVideoId);
+              if (prefetchTarget > 0) {
+                try { UmpMseController774.prefetchSeek(prefetchTarget); } catch (err) {}
+              }
+            }
           }
           return;
         }
