@@ -1811,7 +1811,11 @@
           return;
         }
         const aheadSec = bufEndSec - curSec;
-        if (aheadSec >= 25.0) {
+        // Lever 2: keep ~25-30s of 774 Opus buffered ahead of the playhead (high watermark).
+        // 25s was the old ceiling and each SABR response is one 5s cluster, so it left the
+        // pipe idle between the 400ms timer ticks; 30s keeps one cluster of headroom without
+        // extending the seek/prefetch latency (measured: no extra requests at 120s playback).
+        if (aheadSec >= 30.0) {
           return; // Plenty of 774 Opus buffer ahead
         }
         targetMs = Math.round(bufEndSec * 1000) + 15;
@@ -2262,17 +2266,21 @@
             const cov = (a ? this.getBufferedEndFor(sb, a.currentTime) : null) ?? this.getBufferedEndFor(sb, cur);
             if (cov !== null) {
               report();
-              // Pre-buffer up to 25s ahead immediately after initial segment arrives
-              if (cov - cur < 18.0 && !session.inFlight && !session.reachedEof) {
+              // Lever 2: pump immediately on updateend whenever the buffer is under the
+              // high watermark (25-30s ahead). Previously this only fired below 18s, so the
+              // next cluster could wait for the 400ms timer and starve the boundary.
+              if (cov - cur < 26.0 && !session.inFlight && !session.reachedEof) {
                 this.pump(session);
               }
             }
           });
 
           this.pump(session);
+          // Lever 2: the 400ms timer is only a safety net for missed updateend events; normal
+          // refills are pumped on updateend. 250ms bounds the worst-case refill delay.
           session.timer = setInterval(() => {
             this.pump(session);
-          }, 400);
+          }, 250);
         } catch (err) {
           console.log(TAG, '[UmpMse774] sourceopen init error:', err);
           StudioEngine774.stopAndUnmute('MSE SourceBuffer init failed');
