@@ -9,6 +9,10 @@
     return; // YouTube Music has its own native high-quality engine; do not hook
   }
 
+  if (window.__ytssMainWorldInjected) return;
+  window.__ytssMainWorldInjected = true;
+  try { document.documentElement?.setAttribute('data-ytss-injected', '1'); } catch (e) {}
+
   const TAG = '[YTSS]';
   const ORIGINAL_FETCH = window.fetch;
   const ORIGINAL_XHR_OPEN = XMLHttpRequest.prototype.open;

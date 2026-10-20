@@ -1,0 +1,97 @@
+{
+  "manifest_version": 3,
+  "name": "ytspoofingstream (vorapis edition)",
+  "version": "0.2.6.3",
+  "description": "Force Studio Opus 774 on YouTube. Runs alongside Project VORAPIS v3 (userscript).",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "ytspoofingstream@dh6k",
+      "strict_min_version": "128.0"
+    }
+  },
+  "icons": {
+    "16": "assets/icon16.png",
+    "48": "assets/icon48.png",
+    "128": "assets/icon128.png"
+  },
+  "permissions": [
+    "scripting",
+    "storage",
+    "activeTab",
+    "tabs",
+    "cookies",
+    "declarativeNetRequest",
+    "alarms",
+    "downloads",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "*://*.youtube.com/*",
+    "*://*.googlevideo.com/*",
+    "*://*.googleapis.com/*",
+    "*://*.googleusercontent.com/*"
+  ],
+  "background": {
+    "scripts": [
+      "src/harvester.js",
+      "src/background.js"
+    ]
+  },
+  "action": {
+    "default_popup": "src/popup.html",
+    "default_icon": {
+      "16": "assets/icon16.png",
+      "48": "assets/icon48.png",
+      "128": "assets/icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.youtube.com/*"
+      ],
+      "exclude_matches": [
+        "*://music.youtube.com/*"
+      ],
+      "js": [
+        "src/inject.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "*://*.youtube.com/*"
+      ],
+      "exclude_matches": [
+        "*://music.youtube.com/*"
+      ],
+      "js": [
+        "src/bridge.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "*://music.youtube.com/*"
+      ],
+      "js": [
+        "src/ytm_harvester_cs.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "locales/*.json",
+        "src/inject.js"
+      ],
+      "matches": [
+        "*://*.youtube.com/*"
+      ]
+    }
+  ]
+}

@@ -13,8 +13,8 @@
   const isFramed = window.self !== window.top;
   if (!isFramed) return;
   const ancestors = location.ancestorOrigins;
-  const PARENT_ORIGIN = ancestors && ancestors.length === 1 ? ancestors[0] : '';
-  if (!PARENT_ORIGIN.startsWith('chrome-extension://')) return;
+  const PARENT_ORIGIN = ancestors && ancestors.length === 1 ? ancestors[0] : '*';
+  if (ancestors && !PARENT_ORIGIN.startsWith('chrome-extension://') && !PARENT_ORIGIN.startsWith('moz-extension://')) return;
 
   const TAG = '[YTM-Harvester]';
   const urlVid = new URLSearchParams(location.search).get('v');

@@ -7,6 +7,23 @@ if (location.hostname === 'music.youtube.com') {
   // Do not touch YouTube Music
 } else {
 
+// Fallback MAIN-world script injection if the browser did not execute the
+// declarative `world: "MAIN"` content_script at document_start.
+function ensureMainWorldInjected() {
+  try {
+    const root = document.documentElement;
+    if (!root || root.hasAttribute('data-ytss-injected') || document.getElementById('ytss-main-world-fallback')) {
+      return;
+    }
+    const s = document.createElement('script');
+    s.id = 'ytss-main-world-fallback';
+    s.src = chrome.runtime.getURL('src/inject.js');
+    s.onload = () => s.remove();
+    (document.head || root).appendChild(s);
+  } catch (e) {}
+}
+ensureMainWorldInjected();
+
 // MAIN world → Service Worker
 // Retries once after 600ms if the SW was killed and is restarting.
 function safeSend(msg, callback, retryCount = 0) {

@@ -379,16 +379,54 @@ function reEscape(s) {
 //    played on Desktop.
 let _setupRulesChain = Promise.resolve();
 
+async function getDnrRules() {
+  if (chrome.declarativeNetRequest?.getSessionRules) {
+    try {
+      return await chrome.declarativeNetRequest.getSessionRules();
+    } catch (e) {}
+  }
+  if (chrome.declarativeNetRequest?.getDynamicRules) {
+    return await chrome.declarativeNetRequest.getDynamicRules();
+  }
+  return [];
+}
+
+async function updateDnrRules({ removeRuleIds = [], addRules = [] }) {
+  if (chrome.declarativeNetRequest?.updateSessionRules) {
+    try {
+      await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds, addRules });
+      return 'session';
+    } catch (sessionErr) {
+      console.warn(TAG, '[DNR] updateSessionRules failed, falling back to updateDynamicRules:', sessionErr);
+    }
+  }
+  if (chrome.declarativeNetRequest?.updateDynamicRules) {
+    // Dynamic rules do not allow `tabIds` in conditions on Chromium/Firefox
+    const sanitizedAddRules = addRules.map(rule => {
+      if (!rule.condition?.tabIds) return rule;
+      const cond = { ...rule.condition };
+      delete cond.tabIds;
+      return { ...rule, condition: cond };
+    });
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds,
+      addRules: sanitizedAddRules,
+    });
+    return 'dynamic';
+  }
+  throw new Error('declarativeNetRequest session/dynamic rule APIs unavailable');
+}
+
 async function setupStaticRules() {
   const run = async () => {
     try {
       const storage = await chrome.storage.local.get('enabled');
-      const existingRules = await chrome.declarativeNetRequest.getSessionRules();
+      const existingRules = await getDnrRules();
       const existingIds = existingRules.map(r => r.id);
 
       if (storage.enabled === false) {
         if (existingIds.length > 0) {
-          await chrome.declarativeNetRequest.updateSessionRules({
+          await updateDnrRules({
             removeRuleIds: [...new Set(existingIds)],
             addRules: [],
           });
@@ -677,11 +715,11 @@ async function setupStaticRules() {
       }
     });
 
-      await chrome.declarativeNetRequest.updateSessionRules({
+      const dnrTier = await updateDnrRules({
         removeRuleIds: [...new Set(rulesToRemove)],
         addRules: rulesToAdd,
       });
-      console.log(TAG, `Static DNR rules enabled (${rulesToAdd.length} rules: Origin + per-client API UA + Media UA + Blacklist/SW Block + CORS).`);
+      console.log(TAG, `Static DNR rules enabled (${rulesToAdd.length} ${dnrTier} rules: Origin + per-client API UA + Media UA + Blacklist/SW Block + CORS).`);
     } catch (e) {
       console.log(TAG, 'Failed to setup static rules:', e);
     }
@@ -893,42 +931,78 @@ async function fetchFromClient(videoId, client) {
 // ─── OFFSCREEN HARVESTER & WEBREQUEST LISTENER ───────────────────────
 let offscreenIdleTimer = null;
 
+const HarvesterPlatform = {
+  get isOffscreenSupported() {
+    return Boolean(chrome.offscreen && typeof chrome.offscreen.createDocument === 'function');
+  },
+  async ensure() {
+    if (offscreenIdleTimer) {
+      clearTimeout(offscreenIdleTimer);
+      offscreenIdleTimer = null;
+    }
+    if (this.isOffscreenSupported) {
+      if (await chrome.offscreen.hasDocument?.()) {
+        return;
+      }
+      try {
+        await chrome.offscreen.createDocument({
+          url: chrome.runtime.getURL('src/harvester.html'),
+          reasons: ['IFRAME_SCRIPTING', 'DOM_PARSER', 'AUDIO_PLAYBACK'],
+          justification: 'Harvest HQ audio streams from YouTube Music and TV',
+        });
+        console.log(TAG, '[Harvester] Offscreen document created on-demand');
+      } catch (err) {
+        if (!err.message?.includes('Only a single offscreen document may be created')) {
+          console.log(TAG, '[Harvester] Offscreen creation notice:', err);
+        }
+      }
+      return;
+    }
+    // Firefox MV3 background event page has a DOM and loads src/harvester.js directly
+    if (typeof window !== 'undefined' && window.__ytssLocalHarvester) {
+      if (!window.__ytssLocalHarvester.hasHost()) {
+        window.__ytssLocalHarvester.ensureHost();
+        console.log(TAG, '[Harvester] Background DOM harvester host created on-demand (Firefox event page)');
+      }
+    }
+  },
+  async send(msg) {
+    if (this.isOffscreenSupported) {
+      return chrome.runtime.sendMessage(msg);
+    }
+    if (typeof window !== 'undefined' && window.__ytssLocalHarvester) {
+      return window.__ytssLocalHarvester.send(msg);
+    }
+    return chrome.runtime.sendMessage(msg);
+  },
+  async closeIfIdle() {
+    if (this.isOffscreenSupported) {
+      if (chrome.offscreen.hasDocument && await chrome.offscreen.hasDocument()) {
+        try {
+          await chrome.offscreen.closeDocument();
+          console.log(TAG, '[Harvester] Offscreen document auto-slept (closed to free 100% RAM)');
+        } catch (e) {}
+      }
+      return;
+    }
+    if (typeof window !== 'undefined' && (window.__ytssLocalHarvester?.hasHost() || window.__ytssLocalHarvester?.hasFrame())) {
+      window.__ytssLocalHarvester.close();
+      console.log(TAG, '[Harvester] Background DOM harvester host auto-slept (removed to free 100% RAM)');
+    }
+  }
+};
+
 function scheduleOffscreenClose(delayMs = 10000) {
   if (offscreenIdleTimer) clearTimeout(offscreenIdleTimer);
   offscreenIdleTimer = setTimeout(async () => {
     offscreenIdleTimer = null;
     if (activeHarvestSession || pendingHarvests.size > 0) return;
-    if (chrome.offscreen && chrome.offscreen.hasDocument && await chrome.offscreen.hasDocument()) {
-      try {
-        await chrome.offscreen.closeDocument();
-        console.log(TAG, '[Harvester] Offscreen document auto-slept (closed to free 100% RAM)');
-      } catch (e) {}
-    }
+    await HarvesterPlatform.closeIfIdle();
   }, delayMs);
 }
 
 async function ensureOffscreenDocument() {
-  if (offscreenIdleTimer) {
-    clearTimeout(offscreenIdleTimer);
-    offscreenIdleTimer = null;
-  }
-  if (chrome.offscreen) {
-    if (await chrome.offscreen.hasDocument?.()) {
-      return;
-    }
-    try {
-      await chrome.offscreen.createDocument({
-        url: chrome.runtime.getURL('src/harvester.html'),
-        reasons: ['IFRAME_SCRIPTING', 'DOM_PARSER', 'AUDIO_PLAYBACK'],
-        justification: 'Harvest HQ audio streams from YouTube Music and TV',
-      });
-      console.log(TAG, '[Harvester] Offscreen document created on-demand');
-    } catch (err) {
-      if (!err.message?.includes('Only a single offscreen document may be created')) {
-        console.log(TAG, '[Harvester] Offscreen creation notice:', err);
-      }
-    }
-  }
+  await HarvesterPlatform.ensure();
 }
 
 function cleanStreamUrl(rawUrl) {
@@ -969,13 +1043,14 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
       const is774 = url.includes('itag=774') || url.includes('/itag/774');
       if (!is774) return;
 
-      // CRITICAL: Only intercept requests originating from offscreen harvester document (tabId === -1).
+      // CRITICAL: Only intercept requests originating from offscreen/background harvester document (tabId === -1).
       // Normal browser tabs (such as the active YouTube player tab) have tabId >= 0.
       // We must NEVER intercept playback requests from the user's active YouTube tab!
       if (details.tabId !== -1) return;
 
-      // Ensure initiator is NOT www.youtube.com
-      if (details.initiator && details.initiator.includes('www.youtube.com')) return;
+      // Ensure initiator is NOT www.youtube.com (Chromium provides `initiator`; Firefox provides `originUrl`)
+      const initiator = details.initiator || details.originUrl || details.documentUrl || '';
+      if (initiator.includes('www.youtube.com')) return;
 
       if (activeHarvestSession && !activeHarvestSession.cancelled) {
         const currentSession = activeHarvestSession;
@@ -1020,7 +1095,8 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
         activeHarvestSession = null;
 
         // Reset harvester frame to avoid background playback load
-        chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP_HARVEST' }).catch(() => {});
+        HarvesterPlatform.send({ type: 'OFFSCREEN_STOP_HARVEST' }).catch(() => {});
+        scheduleOffscreenClose();
 
         resolve([fmt]);
       }
@@ -1074,7 +1150,7 @@ async function _doHarvest(videoId, title = null, author = null) {
     try { activeHarvestSession.resolve(cancelledRes); } catch (e) {}
     clearTimeout(activeHarvestSession.timer);
     activeHarvestSession = null;
-    chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP_HARVEST' }).catch(() => {});
+    HarvesterPlatform.send({ type: 'OFFSCREEN_STOP_HARVEST' }).catch(() => {});
   }
 
   const targetId = videoId;
@@ -1085,7 +1161,7 @@ async function _doHarvest(videoId, title = null, author = null) {
       if (activeHarvestSession && activeHarvestSession.sessionId === sessionId) {
         activeHarvestSession = null;
         console.log(TAG, `[YTM_HARVEST] Timeout for ${videoId} (session #${sessionId}), falling back to native`);
-        chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP_HARVEST' }).catch(() => {});
+        HarvesterPlatform.send({ type: 'OFFSCREEN_STOP_HARVEST' }).catch(() => {});
         scheduleOffscreenClose();
         const timedOutRes = [];
         timedOutRes._timedOut = true;
@@ -1105,7 +1181,7 @@ async function _doHarvest(videoId, title = null, author = null) {
       }
     };
 
-    chrome.runtime.sendMessage({
+    HarvesterPlatform.send({
       type: 'OFFSCREEN_HARVEST_YTM',
       videoId: targetId
     }).catch(err => {
@@ -1119,10 +1195,12 @@ async function _doHarvest(videoId, title = null, author = null) {
 const HARVESTER_URL = chrome.runtime.getURL('src/harvester.html');
 const VALID_OP_MODES = new Set(['HYBRID_HQ', 'YTM_HARVESTER', 'TV_HEADLESS', 'TV_UMP_MSE', 'TV_RELAY', 'AUTO']);
 
-// Harvest results and aborts must come from our own offscreen document. Content
-// scripts run inside youtube.com tabs and must not be able to forge them.
+// Harvest results and aborts must come from our own offscreen document or in-page background harvester.
+// Content scripts run inside youtube.com tabs and must not be able to forge them.
 function isFromHarvester(sender) {
-  return sender?.id === chrome.runtime.id && !sender.tab && typeof sender.url === 'string' && sender.url.startsWith(HARVESTER_URL);
+  if (!sender || sender.id !== chrome.runtime.id || sender.tab) return false;
+  if (sender._localHarvester === true) return true;
+  return typeof sender.url === 'string' && sender.url.startsWith(HARVESTER_URL);
 }
 
 // The harvested URL is fed straight to the player as its audio source, so only
@@ -1139,7 +1217,7 @@ function isValid774Url(raw) {
   }
 }
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+function handleRuntimeMessage(msg, sender, sendResponse) {
   if (!msg || sender?.id !== chrome.runtime.id) return;
 
   if (msg.type === 'OFFSCREEN_HARVEST_SUCCESS') {
@@ -1186,7 +1264,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       };
       const resolve = activeHarvestSession.resolve;
       activeHarvestSession = null;
-      chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP_HARVEST' }).catch(() => {});
+      HarvesterPlatform.send({ type: 'OFFSCREEN_STOP_HARVEST' }).catch(() => {});
       scheduleOffscreenClose();
       resolve([fmt]);
     }
@@ -1203,7 +1281,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       console.log(TAG, `[YTM_HARVEST] Harvest aborted for ${msg.videoId}: ${msg.reason}`);
       const resolve = activeHarvestSession.resolve;
       activeHarvestSession = null;
-      chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP_HARVEST' }).catch(() => {});
+      HarvesterPlatform.send({ type: 'OFFSCREEN_STOP_HARVEST' }).catch(() => {});
       scheduleOffscreenClose();
       const abortRes = [];
       if (msg.reason === 'NO_774_STREAM' || String(msg.reason || '').startsWith('UNPLAYABLE')) {
@@ -1247,7 +1325,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       clearTimeout(activeHarvestSession.timer);
       activeHarvestSession = null;
     }
-    chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP_HARVEST' }).catch(() => {});
+    HarvesterPlatform.send({ type: 'OFFSCREEN_STOP_HARVEST' }).catch(() => {});
     scheduleOffscreenClose();
     sendResponse({ success: true });
     return true;
@@ -1646,7 +1724,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ready: true, version: VERSION });
     return;
   }
-});
+}
+
+chrome.runtime.onMessage.addListener(handleRuntimeMessage);
+
+if (typeof window !== 'undefined') {
+  window.__ytssOnLocalHarvesterEvent = (payload) => {
+    handleRuntimeMessage(
+      payload,
+      { id: chrome.runtime.id, url: HARVESTER_URL, _localHarvester: true },
+      () => {}
+    );
+  };
+}
 
 chrome.runtime.onInstalled.addListener(() => {
   setupStaticRules();
@@ -1658,7 +1748,7 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'ytss-keepalive') {
-    chrome.declarativeNetRequest.getSessionRules().then(rules => {
+    getDnrRules().then(rules => {
       const hasOriginRule = rules.some(r => r.id === ORIGIN_RULE_ID);
       if (!hasOriginRule) {
         console.log(TAG, '[Keepalive] DNR rules missing — re-applying...');
