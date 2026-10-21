@@ -303,6 +303,173 @@
     }
   }
 
+  // ─── CHANNEL / PLAYBACK HEALTH LOGGER (Firefox only; debug flag; OFF by default) ───
+  // Field diagnostic for the S1 "one ear" report and the S2 transient-silence report. It is
+  // inert unless localStorage['ytss_debug_channel_health'] === '1'. The tap is non-invasive:
+  // HTMLMediaElement.captureStream() tees the decoded audio before element volume (element
+  // output is untouched), then ChannelSplitter -> 2 analysers sampled at 4 Hz. Only same-origin
+  // (blob:/) media is tappable: cross-origin googlevideo <audio src> is CORS-tainted (silent), so
+  // that path logs context only. Enable/read back from the page console on youtube.com:
+  //   localStorage.setItem('ytss_debug_channel_health','1'); location.reload();
+  //   __ytssChannelHealth.dump()          // JSON string of the last events
+  //   __ytssChannelHealth.clear();
+  const IS_FIREFOX = typeof navigator !== 'undefined' && /Firefox\//.test(navigator.userAgent || '');
+  const ChannelHealth = (() => {
+    let on = false;
+    try { on = IS_FIREFOX && localStorage.getItem('ytss_debug_channel_health') === '1'; } catch (e) {}
+    if (!on) return { enabled: false, attach() {}, note() {}, noteInit() {} };
+
+    const events = [];
+    const RING = 160, SAMPLE_MS = 250, DEAD_DB = -50, LIVE_DB = -30, SILENT_DB = -60;
+    let ctx = null, tapEl = null, tapSrc = '', anL = null, anR = null, timer = null;
+    let deadStart = 0, deadLogged = false, silStart = 0, silLogged = false;
+    let tapIdleLogged = false, lastRate = -1, monoNoteSrc = '';
+
+    const db = (x) => (x > 0 ? Math.round(20 * Math.log10(x) * 10) / 10 : -120);
+    const rms = (an) => {
+      const buf = new Float32Array(an.fftSize);
+      an.getFloatTimeDomainData(buf);
+      let s = 0;
+      for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
+      return Math.sqrt(s / buf.length);
+    };
+    const initCh = () => {
+      try { return (typeof UmpMseController774 !== 'undefined' && UmpMseController774.session) ? UmpMseController774.session.initChannels : null; } catch (e) { return null; }
+    };
+    const state = () => ({
+      opMode: (typeof S !== 'undefined' ? S.operationMode : null),
+      src: (typeof StudioEngine774 !== 'undefined' && StudioEngine774.best774Candidate?._src) || (typeof status !== 'undefined' ? status.activeMethod : null),
+      vid: (typeof StudioEngine774 !== 'undefined' && StudioEngine774.activeVideoId) || null,
+      initCh: initCh(),
+    });
+    function persist() {
+      try { localStorage.setItem('ytss_channel_health_log', JSON.stringify(events.slice(-50))); } catch (e) {}
+    }
+    function note(kind, extra) {
+      if (!on) return null;
+      const ev = Object.assign({ t: Date.now(), kind }, state(), extra || {});
+      events.push(ev);
+      if (events.length > RING) events.shift();
+      if (kind === 'channel-loss' || kind === 'audio-silence' || kind === 'init') persist();
+      return ev;
+    }
+    // Init audit: OpusHead (CodecPrivate 0x63A2) channel count is what Firefox decodes with.
+    // Log every init, appended or ignored, so a channel-config change is visible in the field.
+    function noteInit(u8, meta) {
+      if (!on) return null;
+      try {
+        const bytes = u8 instanceof Uint8Array ? u8 : new Uint8Array(u8);
+        const info = (typeof UmpMseController774 !== 'undefined' && UmpMseController774.opusInitChannelInfo)
+          ? UmpMseController774.opusInitChannelInfo(bytes) : null;
+        return note('init', Object.assign({ bytes: bytes.length }, info || {}, meta || {}));
+      } catch (e) { return null; }
+    }
+    function attach(el) {
+      if (!on || !el) return;
+      const src = el.currentSrc || el.src || '';
+      if (tapEl === el && tapSrc === src && timer) return;
+      const tappable = !!src && (src.startsWith('blob:') || (() => {
+        try { return new URL(src).origin === location.origin; } catch (e) { return false; }
+      })());
+      if (!tappable) {
+        if (!el.__ytssChTapUnavailable) {
+          el.__ytssChTapUnavailable = true;
+          note('tap-unavailable', { src: src.slice(0, 40), reason: 'cross-origin capture (CORS-tainted)' });
+        }
+        return;
+      }
+      if (!el.__ytssChPlayingHook) {
+        el.__ytssChPlayingHook = true;
+        el.addEventListener('playing', () => attach(el));
+      }
+      try {
+        if (!ctx) {
+          ctx = new (window.AudioContext || window.webkitAudioContext)();
+          if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+        }
+        const cap = el.mozCaptureStream ? 'mozCaptureStream' : (typeof el.captureStream === 'function' ? 'captureStream' : null);
+        if (!cap) { note('tap-unavailable', { reason: 'no captureStream' }); return; }
+        const ms = el.mozCaptureStream ? el.mozCaptureStream() : el.captureStream();
+        if (!ms || ms.getAudioTracks().length === 0) return; // retry on the next 'playing'
+        const srcNode = ctx.createMediaStreamSource(ms);
+        const split = ctx.createChannelSplitter(2);
+        anL = ctx.createAnalyser(); anR = ctx.createAnalyser();
+        anL.fftSize = 2048; anR.fftSize = 2048;
+        const silent = ctx.createGain(); silent.gain.value = 0;
+        srcNode.connect(split);
+        split.connect(anL, 0); split.connect(anR, 1);
+        anL.connect(silent); anR.connect(silent); silent.connect(ctx.destination);
+        tapEl = el; tapSrc = src; deadStart = 0; deadLogged = false; silStart = 0; silLogged = false; lastRate = -1;
+        note('tap-attached', { src: src.slice(0, 24), tap: cap, ctx: ctx.state });
+        if (!timer) timer = setInterval(sample, SAMPLE_MS);
+      } catch (e) {
+        note('tap-unavailable', { reason: String(e && e.message || e) });
+      }
+    }
+    function bufferedAhead(el) {
+      try {
+        const b = el.buffered, t = el.currentTime;
+        for (let i = 0; i < b.length; i++) if (t >= b.start(i) - 0.05 && t <= b.end(i)) return Math.round((b.end(i) - t) * 100) / 100;
+      } catch (e) {}
+      return null;
+    }
+    function sample() {
+      if (!on || !tapEl || !anL || !anR || !ctx) return;
+      if (ctx.state !== 'running') {
+        if (!tapIdleLogged) { tapIdleLogged = true; note('tap-suspended', { ctx: ctx.state }); }
+        return;
+      }
+      const el = tapEl;
+      if (el.paused || el.ended || el.readyState < 2) { deadStart = 0; deadLogged = false; silStart = 0; silLogged = false; return; }
+      const dL = db(rms(anL)), dR = db(rms(anR)), now = Date.now();
+      const extra = {
+        l: dL, r: dR, dLR: Math.round((dL - dR) * 10) / 10,
+        ahead: bufferedAhead(el), rs: el.readyState,
+        rate: Math.round((el.playbackRate || 1) * 1000) / 1000, ct: Math.round(el.currentTime * 100) / 100,
+      };
+      const ch = initCh();
+      if (ch === 1 && monoNoteSrc !== tapSrc) {
+        monoNoteSrc = tapSrc;
+        note('mono-source', { note: 'first init declares 1 Opus channel; skip S1 detection for this stream' });
+      }
+      const oneDead = ch !== 1 && ((dL <= DEAD_DB && dR >= LIVE_DB) || (dR <= DEAD_DB && dL >= LIVE_DB));
+      if (oneDead) {
+        if (!deadStart) deadStart = now;
+        if (!deadLogged && now - deadStart >= 200) {
+          deadLogged = true;
+          console.warn(TAG, '[ChannelHealth] ONE CHANNEL LOST', JSON.stringify(Object.assign({ heldMs: now - deadStart }, extra, state())));
+          note('channel-loss', Object.assign({ heldMs: now - deadStart }, extra));
+        }
+      } else {
+        if (deadLogged) note('channel-recover', Object.assign({ heldMs: deadStart ? now - deadStart : 0 }, extra));
+        deadStart = 0; deadLogged = false;
+      }
+      const bothSilent = dL <= SILENT_DB && dR <= SILENT_DB;
+      if (bothSilent) {
+        if (!silStart) silStart = now;
+        if (!silLogged && now - silStart >= 500) {
+          silLogged = true;
+          console.warn(TAG, '[ChannelHealth] AUDIO SILENCE', JSON.stringify(Object.assign({ heldMs: now - silStart }, extra, state())));
+          note('audio-silence', Object.assign({ heldMs: now - silStart }, extra));
+        }
+      } else { silStart = 0; silLogged = false; }
+      const rate = Math.round((el.playbackRate || 1) * 1000) / 1000;
+      if (lastRate !== -1 && rate !== lastRate) note('rate', { from: lastRate, to: rate, ahead: bufferedAhead(el) });
+      lastRate = rate;
+    }
+    try {
+      window.__ytssChannelHealth = {
+        events,
+        dump: () => JSON.stringify(events, null, 1),
+        clear: () => { events.length = 0; try { localStorage.removeItem('ytss_channel_health_log'); } catch (e) {} },
+      };
+      let prev = [];
+      try { prev = JSON.parse(localStorage.getItem('ytss_channel_health_log') || '[]'); } catch (e) {}
+      if (Array.isArray(prev) && prev.length) events.push({ t: Date.now(), kind: 'previous-session', count: prev.length, last: prev.slice(-5) });
+      console.info(TAG, '[ChannelHealth] enabled. Dump with __ytssChannelHealth.dump()');
+    } catch (e) {}
+    return { enabled: true, attach, note, noteInit };
+  })();
   // Single writer for TV 774 status — activates UmpMseController774 (UMP Demuxer + MSE)
   const sabrRewrite = {
     on: false,
@@ -1696,6 +1863,44 @@
       return { segments, nextPlaybackCookie, redirectUrl, sabrError };
     },
 
+    // Firefox MSE takes the decoded channel count from the OpusHead inside the WebM
+    // CodecPrivate (0x63A2); TrackEntry Audio.Channels (0x9F) is not authoritative
+    // when they disagree (FF159: head=1/track=2 -> mono, head=2/track=1 -> stereo).
+    // Appending a later init with a different OpusHead silently collapses the output
+    // to one channel (measured: tmp/s1/report.md), so later inits are logged here and
+    // still never appended. Do not "forward" a later init into the SourceBuffer.
+    opusInitChannelInfo(u8) {
+      if (!u8 || u8.length < 32) return null;
+      try {
+        const readSize = (i) => {
+          const b = u8[i];
+          if (b & 0x80) return { len: 1, size: b & 0x7f };
+          if (b & 0x40) return { len: 2, size: ((b & 0x3f) << 8) | u8[i + 1] };
+          return null;
+        };
+        for (let i = 0; i + 12 < u8.length; i++) {
+          if (u8[i] !== 0x63 || u8[i + 1] !== 0xa2) continue;
+          const sz = readSize(i + 2);
+          if (!sz || sz.size < 19) continue;
+          const off = i + 2 + sz.len;
+          if (off + 19 > u8.length) continue;
+          const magic = String.fromCharCode(u8[off], u8[off + 1], u8[off + 2], u8[off + 3], u8[off + 4], u8[off + 5], u8[off + 6], u8[off + 7]);
+          if (magic !== 'OpusHead') continue;
+          let trackChannels = null;
+          for (let k = 0; k + 3 < u8.length; k++) {
+            if (u8[k] === 0x9f && u8[k + 1] === 0x81) { trackChannels = u8[k + 2]; break; }
+          }
+          return {
+            opusChannels: u8[off + 9],
+            sampleRate: (u8[off + 12] | (u8[off + 13] << 8) | (u8[off + 14] << 16) | (u8[off + 15] << 24)) >>> 0,
+            mappingFamily: u8[off + 18],
+            trackChannels
+          };
+        }
+      } catch (e) {}
+      return null;
+    },
+
     getBufferedEndFor(sb, timeSec) {
       if (!sb) return null;
       try {
@@ -1918,10 +2123,16 @@
         session.redirectCount = 0;
         for (const seg of demuxed.segments) {
           if (seg.isInit) {
+            const initInfo = this.opusInitChannelInfo(seg.data);
+            ChannelHealth.noteInit(seg.data, { appended: !session.hasInit, seq: seg.seq });
             if (!session.hasInit) {
               session.appendQueue.push(seg.data);
               session.hasInit = true;
-              console.log(TAG, `[UmpMse774] Queued 774 WebM Init Segment (${seg.data.length}B) for ${session.videoId}`);
+              session.initChannels = initInfo ? initInfo.opusChannels : null;
+              console.log(TAG, `[UmpMse774] Queued 774 WebM Init Segment (${seg.data.length}B, opusCh=${initInfo && initInfo.opusChannels}, trackCh=${initInfo && initInfo.trackChannels}, map=${initInfo && initInfo.mappingFamily}) for ${session.videoId}`);
+            } else if (initInfo && session.initChannels && initInfo.opusChannels !== session.initChannels) {
+              // Channel-changing init mid-stream: appending it would downmix silently on Firefox.
+              console.warn(TAG, `[UmpMse774] IGNORED channel-changing init for ${session.videoId}: session=${session.initChannels}ch arrived=${initInfo.opusChannels}ch (${seg.data.length}B)`);
             }
           } else {
             if (session.seekTargetSec !== null) {
@@ -1996,6 +2207,7 @@
 
     onSeek(targetSec, opts = {}) {
       const session = this.session;
+      ChannelHealth.note('ump-seek', { target: Math.round(Number(targetSec) * 1000) / 1000, userSeek: opts.userSeek !== false });
       if (!session || session.aborted || !this.isActive || !session.sourceBuffer) return;
       // Lever 3: the post-seek audio align window is only armed for real user/seek-path
       // dispatches. Attach/loadedmetadata, reconnect and >1.5s watchdog snaps do not need
@@ -2642,12 +2854,14 @@
 
         this.audio.addEventListener('waiting', () => {
           if (!this.isActive || this.isAdActive()) return;
+          ChannelHealth.note('audio-waiting', { rs: this.audio.readyState });
           this._audioStalledAt = Date.now();
           this._isAudioBuffering = true;
         });
 
         this.audio.addEventListener('stalled', () => {
           if (!this.isActive || this.isAdActive()) return;
+          ChannelHealth.note('audio-stalled', { rs: this.audio.readyState });
           this._audioStalledAt = Date.now();
           this._isAudioBuffering = true;
         });
@@ -4234,6 +4448,7 @@
       }
 
       console.log(TAG, `[StudioEngine774] Auto-reconnecting stream (#${this._reconnectAttempts}, reason: ${reason}) at ${targetTime.toFixed(2)}s...`);
+      ChannelHealth.note('reconnect', { reason: String(reason || '').slice(0, 40), at: Math.round(targetTime * 100) / 100 });
       try {
         this.audio.pause();
         this.audio.removeAttribute('src');
@@ -4242,6 +4457,7 @@
 
       this.audio.src = streamUrl;
       this.audio.load();
+      ChannelHealth.attach(this.audio);
       if (targetTime > 0.05) {
         try { this.audio.currentTime = targetTime; } catch (e) {}
       }
@@ -4694,6 +4910,7 @@
         this.audio.src = streamUrl;
         this.audio.load();
       }
+      ChannelHealth.attach(this.audio);
 
       // Only seek audio on initial attach if video is already past 0.8s for THIS exact videoId!
       // Using getVideoTimeFor(videoId) prevents reading the outgoing track's currentTime during SPA transitions.
@@ -5786,7 +6003,9 @@
 
   // Resync on visibilitychange without resetting audio
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden || !S.enabled || isMusicSite) return;
+    ChannelHealth.note('visibility', { state: document.visibilityState, hidden: document.hidden });
+    if (document.hidden) return;
+    if (!S.enabled || isMusicSite) return;
     const videoId = getVideoIdFromUrl();
     if (videoId) {
       if (StudioEngine774.isActive && StudioEngine774.activeVideoId === videoId) {
