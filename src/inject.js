@@ -3962,7 +3962,15 @@
             // YT paused (UI button / space / media session through player)
             // Ignore state 2 noise during fullscreen transitions or timeline seek/scrub.
             if (!fsBusy()) {
-              if (!this.isSeekInProgress() || this._userPaused) {
+              const gState2 = window.__ytssPauseGesture;
+              const userPauseIntentState2 = gState2 && !gState2.wasPaused && (Date.now() - gState2.at) < 450;
+              if (IS_FIREFOX && !userPauseIntentState2 && Date.now() < (this._tabReturnGraceUntil || 0)) {
+                // Firefox tab return: YouTube can report state 2 for a programmatic/transient
+                // element pause right after the tab returns. Do not turn that into a sticky
+                // user-pause lock (which blocks video.play() and keeps re-pausing the slave
+                // audio forever); defer the stop like the other tab-return paths.
+                this.deferAudioPause();
+              } else if (!this.isSeekInProgress() || this._userPaused) {
                 this.lockPause();
               } else if (this.audio && !this.audio.paused) {
                 try { this.audio.pause(); } catch (e) {}
