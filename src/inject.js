@@ -304,15 +304,12 @@
   }
 
   // ─── CHANNEL / PLAYBACK HEALTH LOGGER (Firefox only; debug flag; OFF by default) ───
-  // Field diagnostic for the S1 "one ear" report and the S2 transient-silence report. It is
-  // inert unless localStorage['ytss_debug_channel_health'] === '1'. The tap is non-invasive:
-  // HTMLMediaElement.captureStream() tees the decoded audio before element volume (element
-  // output is untouched), then ChannelSplitter -> 2 analysers sampled at 4 Hz. Only same-origin
-  // (blob:/) media is tappable: cross-origin googlevideo <audio src> is CORS-tainted (silent), so
-  // that path logs context only. Enable/read back from the page console on youtube.com:
-  //   localStorage.setItem('ytss_debug_channel_health','1'); location.reload();
-  //   __ytssChannelHealth.dump()          // JSON string of the last events
-  //   __ytssChannelHealth.clear();
+  // Field diagnostic for S1/S2. HARD ISOLATION: every entry point is wrapped, any exception
+  // disables the logger silently and can never propagate into attach/play/pump code. The tap
+  // is captureStream() on a same-origin blob: element only (non-invasive, pre-volume); every
+  // other source (https, empty, non-blob) is skipped up front without probing.
+  // Enable: localStorage.setItem('ytss_debug_channel_health','1'); location.reload()
+  // Read:   __ytssChannelHealth.dump()  (or localStorage.getItem('ytss_channel_health_log'))
   const IS_FIREFOX = typeof navigator !== 'undefined' && /Firefox\//.test(navigator.userAgent || '');
   const ChannelHealth = (() => {
     let on = false;
@@ -321,10 +318,30 @@
 
     const events = [];
     const RING = 160, SAMPLE_MS = 250, DEAD_DB = -50, LIVE_DB = -30, SILENT_DB = -60;
-    let ctx = null, tapEl = null, tapSrc = '', anL = null, anR = null, timer = null;
+    let dead = false, ctx = null, tapEl = null, tapSrc = '', anL = null, anR = null, timer = null;
+    let tapStream = null, tapGraph = [];
     let deadStart = 0, deadLogged = false, silStart = 0, silLogged = false;
-    let tapIdleLogged = false, lastRate = -1, monoNoteSrc = '';
+    let tapIdleLogged = false, lastRate = -1, monoNoteSrc = '', unavailableSrc = '';
+    let lastEl = null, attachTimer = null;
 
+    function kill(reason) {
+      if (dead) return;
+      dead = true;
+      try { if (timer) clearInterval(timer); } catch (e) {}
+      timer = null;
+      try { if (attachTimer) clearInterval(attachTimer); } catch (e) {}
+      attachTimer = null;
+      try { stopTap(); } catch (e) {}
+      try { if (ctx && typeof ctx.close === 'function') ctx.close(); } catch (e) {}
+      ctx = null; anL = null; anR = null; tapEl = null; tapSrc = '';
+      try { console.warn(TAG, '[ChannelHealth] disabled:', String(reason).slice(0, 120)); } catch (e) {}
+    }
+    function protect(fn) {
+      return function () {
+        if (dead || !on) return undefined;
+        try { return fn.apply(null, arguments); } catch (e) { kill(e && e.message || e); return undefined; }
+      };
+    }
     const db = (x) => (x > 0 ? Math.round(20 * Math.log10(x) * 10) / 10 : -120);
     const rms = (an) => {
       const buf = new Float32Array(an.fftSize);
@@ -333,78 +350,33 @@
       for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
       return Math.sqrt(s / buf.length);
     };
-    const initCh = () => {
-      try { return (typeof UmpMseController774 !== 'undefined' && UmpMseController774.session) ? UmpMseController774.session.initChannels : null; } catch (e) { return null; }
-    };
-    const state = () => ({
-      opMode: (typeof S !== 'undefined' ? S.operationMode : null),
-      src: (typeof StudioEngine774 !== 'undefined' && StudioEngine774.best774Candidate?._src) || (typeof status !== 'undefined' ? status.activeMethod : null),
-      vid: (typeof StudioEngine774 !== 'undefined' && StudioEngine774.activeVideoId) || null,
-      initCh: initCh(),
-    });
+    function stateOf() {
+      try {
+        return {
+          opMode: (typeof S !== 'undefined' ? S.operationMode : null),
+          src: (typeof StudioEngine774 !== 'undefined' && StudioEngine774.best774Candidate?._src) || (typeof status !== 'undefined' ? status.activeMethod : null),
+          vid: (typeof StudioEngine774 !== 'undefined' && StudioEngine774.activeVideoId) || null,
+          initCh: (typeof UmpMseController774 !== 'undefined' && UmpMseController774.session) ? UmpMseController774.session.initChannels : null,
+        };
+      } catch (e) { return {}; }
+    }
     function persist() {
       try { localStorage.setItem('ytss_channel_health_log', JSON.stringify(events.slice(-50))); } catch (e) {}
     }
-    function note(kind, extra) {
-      if (!on) return null;
-      const ev = Object.assign({ t: Date.now(), kind }, state(), extra || {});
+    function _note(kind, extra) {
+      if (dead || !on) return null;
+      const ev = Object.assign({ t: Date.now(), kind }, stateOf(), extra || {});
       events.push(ev);
       if (events.length > RING) events.shift();
       if (kind === 'channel-loss' || kind === 'audio-silence' || kind === 'init') persist();
       return ev;
     }
-    // Init audit: OpusHead (CodecPrivate 0x63A2) channel count is what Firefox decodes with.
-    // Log every init, appended or ignored, so a channel-config change is visible in the field.
-    function noteInit(u8, meta) {
-      if (!on) return null;
-      try {
-        const bytes = u8 instanceof Uint8Array ? u8 : new Uint8Array(u8);
-        const info = (typeof UmpMseController774 !== 'undefined' && UmpMseController774.opusInitChannelInfo)
-          ? UmpMseController774.opusInitChannelInfo(bytes) : null;
-        return note('init', Object.assign({ bytes: bytes.length }, info || {}, meta || {}));
-      } catch (e) { return null; }
-    }
-    function attach(el) {
-      if (!on || !el) return;
-      const src = el.currentSrc || el.src || '';
-      if (tapEl === el && tapSrc === src && timer) return;
-      const tappable = !!src && (src.startsWith('blob:') || (() => {
-        try { return new URL(src).origin === location.origin; } catch (e) { return false; }
-      })());
-      if (!tappable) {
-        if (!el.__ytssChTapUnavailable) {
-          el.__ytssChTapUnavailable = true;
-          note('tap-unavailable', { src: src.slice(0, 40), reason: 'cross-origin capture (CORS-tainted)' });
-        }
-        return;
-      }
-      if (!el.__ytssChPlayingHook) {
-        el.__ytssChPlayingHook = true;
-        el.addEventListener('playing', () => attach(el));
-      }
-      try {
-        if (!ctx) {
-          ctx = new (window.AudioContext || window.webkitAudioContext)();
-          if (ctx.state === 'suspended') ctx.resume().catch(() => {});
-        }
-        const cap = el.mozCaptureStream ? 'mozCaptureStream' : (typeof el.captureStream === 'function' ? 'captureStream' : null);
-        if (!cap) { note('tap-unavailable', { reason: 'no captureStream' }); return; }
-        const ms = el.mozCaptureStream ? el.mozCaptureStream() : el.captureStream();
-        if (!ms || ms.getAudioTracks().length === 0) return; // retry on the next 'playing'
-        const srcNode = ctx.createMediaStreamSource(ms);
-        const split = ctx.createChannelSplitter(2);
-        anL = ctx.createAnalyser(); anR = ctx.createAnalyser();
-        anL.fftSize = 2048; anR.fftSize = 2048;
-        const silent = ctx.createGain(); silent.gain.value = 0;
-        srcNode.connect(split);
-        split.connect(anL, 0); split.connect(anR, 1);
-        anL.connect(silent); anR.connect(silent); silent.connect(ctx.destination);
-        tapEl = el; tapSrc = src; deadStart = 0; deadLogged = false; silStart = 0; silLogged = false; lastRate = -1;
-        note('tap-attached', { src: src.slice(0, 24), tap: cap, ctx: ctx.state });
-        if (!timer) timer = setInterval(sample, SAMPLE_MS);
-      } catch (e) {
-        note('tap-unavailable', { reason: String(e && e.message || e) });
-      }
+    function _noteInit(u8, meta) {
+      if (dead || !on) return null;
+      const bytes = u8 instanceof Uint8Array ? u8 : new Uint8Array(u8);
+      const info = (typeof UmpMseController774 !== 'undefined' && UmpMseController774.opusInitChannelInfo)
+        ? UmpMseController774.opusInitChannelInfo(bytes) : null;
+      return _note('init', Object.assign({ bytes: bytes.length }, info || {}, meta || {}));
     }
     function bufferedAhead(el) {
       try {
@@ -413,13 +385,70 @@
       } catch (e) {}
       return null;
     }
-    function sample() {
-      if (!on || !tapEl || !anL || !anR || !ctx) return;
+    function stopTap() {
+      try { if (timer) clearInterval(timer); } catch (e) {}
+      timer = null;
+      // Release the old capture: an element with a live captureStream can hand back an empty
+      // stream on the next attach (e.g. after a track/src change), so stop tracks and tear the
+      // old graph down explicitly.
+      try { if (tapStream) tapStream.getTracks().forEach((t) => { try { t.stop(); } catch (e) {} }); } catch (e) {}
+      tapStream = null;
+      try { tapGraph.forEach((n) => { try { n.disconnect(); } catch (e) {} }); } catch (e) {}
+      tapGraph = [];
+      tapEl = null; tapSrc = ''; anL = null; anR = null; lastRate = -1;
+      deadStart = 0; deadLogged = false; silStart = 0; silLogged = false;
+    }
+    function _attach(el) {
+      if (dead || !on || !el) return;
+      lastEl = el;
+      const src = el.currentSrc || el.src || '';
+      // Only a blob: MediaSource element is tappable; skip everything else up front.
+      if (!src || src.slice(0, 5) !== 'blob:') {
+        if (unavailableSrc !== src) {
+          unavailableSrc = src;
+          _note('tap-unavailable', { src: String(src).slice(0, 40) || '(none)', reason: 'not a blob: source' });
+        }
+        return;
+      }
+      if (tapEl === el && tapSrc === src && timer) return;
+      // Track/src changed: stop sampling the stale graph immediately (its analysers would read
+      // zeros after the source switch and report a false audio-silence).
+      if (tapSrc && tapSrc !== src) stopTap();
+      // A captureStream taken before the element is actually playing can be a permanently
+      // silent track; only attach once it is decoding and playing.
+      if (el.paused || el.readyState < 2) return;
+      if (typeof el.captureStream !== 'function' && typeof el.mozCaptureStream !== 'function') {
+        if (unavailableSrc !== src) { unavailableSrc = src; _note('tap-unavailable', { src: src.slice(0, 40), reason: 'no captureStream' }); }
+        return;
+      }
+      if (!ctx) {
+        ctx = new (window.AudioContext || window.webkitAudioContext)();
+        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      }
+      const ms = el.mozCaptureStream ? el.mozCaptureStream() : el.captureStream();
+      if (!ms || ms.getAudioTracks().length === 0) return;
+      const srcNode = ctx.createMediaStreamSource(ms);
+      const split = ctx.createChannelSplitter(2);
+      anL = ctx.createAnalyser(); anR = ctx.createAnalyser();
+      anL.fftSize = 2048; anR.fftSize = 2048;
+      const silent = ctx.createGain(); silent.gain.value = 0;
+      srcNode.connect(split);
+      split.connect(anL, 0); split.connect(anR, 1);
+      anL.connect(silent); anR.connect(silent); silent.connect(ctx.destination);
+      tapEl = el; tapSrc = src; tapStream = ms; tapGraph = [srcNode, split, silent, anL, anR];
+      deadStart = 0; deadLogged = false; silStart = 0; silLogged = false; lastRate = -1;
+      _note('tap-attached', { src: src.slice(0, 24), tap: el.mozCaptureStream ? 'mozCaptureStream' : 'captureStream', ctx: ctx.state });
+      if (!timer) timer = setInterval(() => { try { _sample(); } catch (e) { kill(e && e.message || e); } }, SAMPLE_MS);
+    }
+    function _sample() {
+      if (dead || !on || !tapEl || !anL || !anR || !ctx) return;
       if (ctx.state !== 'running') {
-        if (!tapIdleLogged) { tapIdleLogged = true; note('tap-suspended', { ctx: ctx.state }); }
+        if (!tapIdleLogged) { tapIdleLogged = true; _note('tap-suspended', { ctx: ctx.state }); }
         return;
       }
       const el = tapEl;
+      const cur = el.currentSrc || el.src || '';
+      if (tapSrc && cur !== tapSrc) { stopTap(); return; }
       if (el.paused || el.ended || el.readyState < 2) { deadStart = 0; deadLogged = false; silStart = 0; silLogged = false; return; }
       const dL = db(rms(anL)), dR = db(rms(anR)), now = Date.now();
       const extra = {
@@ -427,21 +456,21 @@
         ahead: bufferedAhead(el), rs: el.readyState,
         rate: Math.round((el.playbackRate || 1) * 1000) / 1000, ct: Math.round(el.currentTime * 100) / 100,
       };
-      const ch = initCh();
+      const ch = stateOf().initCh;
       if (ch === 1 && monoNoteSrc !== tapSrc) {
         monoNoteSrc = tapSrc;
-        note('mono-source', { note: 'first init declares 1 Opus channel; skip S1 detection for this stream' });
+        _note('mono-source', { note: 'first init declares 1 Opus channel; S1 detection skipped' });
       }
       const oneDead = ch !== 1 && ((dL <= DEAD_DB && dR >= LIVE_DB) || (dR <= DEAD_DB && dL >= LIVE_DB));
       if (oneDead) {
         if (!deadStart) deadStart = now;
         if (!deadLogged && now - deadStart >= 200) {
           deadLogged = true;
-          console.warn(TAG, '[ChannelHealth] ONE CHANNEL LOST', JSON.stringify(Object.assign({ heldMs: now - deadStart }, extra, state())));
-          note('channel-loss', Object.assign({ heldMs: now - deadStart }, extra));
+          try { console.warn(TAG, '[ChannelHealth] ONE CHANNEL LOST', JSON.stringify(Object.assign({ heldMs: now - deadStart }, extra, stateOf()))); } catch (e) {}
+          _note('channel-loss', Object.assign({ heldMs: now - deadStart }, extra));
         }
       } else {
-        if (deadLogged) note('channel-recover', Object.assign({ heldMs: deadStart ? now - deadStart : 0 }, extra));
+        if (deadLogged) _note('channel-recover', Object.assign({ heldMs: deadStart ? now - deadStart : 0 }, extra));
         deadStart = 0; deadLogged = false;
       }
       const bothSilent = dL <= SILENT_DB && dR <= SILENT_DB;
@@ -449,27 +478,40 @@
         if (!silStart) silStart = now;
         if (!silLogged && now - silStart >= 500) {
           silLogged = true;
-          console.warn(TAG, '[ChannelHealth] AUDIO SILENCE', JSON.stringify(Object.assign({ heldMs: now - silStart }, extra, state())));
-          note('audio-silence', Object.assign({ heldMs: now - silStart }, extra));
+          try { console.warn(TAG, '[ChannelHealth] AUDIO SILENCE', JSON.stringify(Object.assign({ heldMs: now - silStart }, extra, stateOf()))); } catch (e) {}
+          _note('audio-silence', Object.assign({ heldMs: now - silStart }, extra));
         }
       } else { silStart = 0; silLogged = false; }
       const rate = Math.round((el.playbackRate || 1) * 1000) / 1000;
-      if (lastRate !== -1 && rate !== lastRate) note('rate', { from: lastRate, to: rate, ahead: bufferedAhead(el) });
+      if (lastRate !== -1 && rate !== lastRate) _note('rate', { from: lastRate, to: rate, ahead: bufferedAhead(el) });
       lastRate = rate;
     }
     try {
       window.__ytssChannelHealth = {
         events,
-        dump: () => JSON.stringify(events, null, 1),
-        clear: () => { events.length = 0; try { localStorage.removeItem('ytss_channel_health_log'); } catch (e) {} },
+        dump: () => { try { return JSON.stringify(events, null, 1); } catch (e) { return '[]'; } },
+        clear: () => { try { events.length = 0; localStorage.removeItem('ytss_channel_health_log'); } catch (e) {} },
+        dbg: () => ({ dead, on, ctx: ctx && ctx.state, tap: !!tapEl, timer: !!timer, watch: !!attachTimer, src: String(tapSrc).slice(0, 24) }),
       };
       let prev = [];
       try { prev = JSON.parse(localStorage.getItem('ytss_channel_health_log') || '[]'); } catch (e) {}
       if (Array.isArray(prev) && prev.length) events.push({ t: Date.now(), kind: 'previous-session', count: prev.length, last: prev.slice(-5) });
+      // Persistent, cheap re-attach watch: survives src changes and a captureStream that is
+      // briefly empty right after a source switch, without relying on one-shot retry state.
+      attachTimer = setInterval(() => {
+        if (dead || tapEl || !lastEl) return;
+        try { _attach(lastEl); } catch (e) { kill(e && e.message || e); }
+      }, 500);
       console.info(TAG, '[ChannelHealth] enabled. Dump with __ytssChannelHealth.dump()');
-    } catch (e) {}
-    return { enabled: true, attach, note, noteInit };
+    } catch (e) { kill(e && e.message || e); }
+    return {
+      enabled: true,
+      attach: protect(_attach),
+      note: protect(_note),
+      noteInit: protect(_noteInit),
+    };
   })();
+
   // Single writer for TV 774 status — activates UmpMseController774 (UMP Demuxer + MSE)
   const sabrRewrite = {
     on: false,
