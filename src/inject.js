@@ -2621,6 +2621,13 @@
     // video.currentTime is never written by this path.
     _rateCorrection: 1.0,
     _rateCorrectionUntil: 0,
+    _corrApplied: 1.0,
+    _corrActive: false,
+    _driftSmooth: null,
+    _driftHist: [],
+    _driftOutsideTicks: 0,
+    _lastRateApplyAt: 0,
+    _baseUserRate: 1.0,
     _inSyncVol: false,
     _globalEventsHooked: false,
     _hookedVideos: new WeakSet(),
@@ -4606,48 +4613,88 @@
       }
     },
 
-    // Desired playbackRate for the slave <audio>: the master (video/user) rate times the
-    // bounded micro-correction. Always RELATIVE to video.playbackRate so an explicit user
-    // speed change (0.5x..2x) is respected, never overwritten with 1.0.
-    desiredAudioRate(userRate) {
-      const base = (typeof userRate === 'number' && isFinite(userRate) && userRate > 0) ? userRate : 1.0;
-      const active = Date.now() < (this._rateCorrectionUntil || 0);
-      return base * (active ? (this._rateCorrection || 1.0) : 1.0);
-    },
-
+    // S4: the correction multiplier is slewed, never stepped. A step in playbackRate is the
+    // audible wobble the user reported; the old code jumped straight to +/-2..5% and dropped
+    // back to 1.0 the moment a coarse sample came inside the deadband (hunting). Slew is 2%/s
+    // and always relative to the user rate, so an explicit speed change still applies at once.
     applyAudioRate(video) {
       if (!this.audio) return 1.0;
-      const userRate = video ? video.playbackRate : (this.audio.playbackRate || 1.0);
-      const wanted = this.desiredAudioRate(userRate);
+      const hasVideoRate = video && typeof video.playbackRate === 'number' && isFinite(video.playbackRate) && video.playbackRate > 0;
+      const base = hasVideoRate ? video.playbackRate : (this._baseUserRate || 1.0);
+      if (hasVideoRate) this._baseUserRate = base;
+      const now = Date.now();
+      const active = now < (this._rateCorrectionUntil || 0);
+      const target = active ? (this._rateCorrection || 1.0) : 1.0;
+      const prev = this._lastRateApplyAt;
+      const dt = prev ? Math.max(0, Math.min(1500, now - prev)) : 100;
+      this._lastRateApplyAt = now;
+      if (typeof this._corrApplied !== 'number' || !isFinite(this._corrApplied) || this._corrApplied <= 0) this._corrApplied = 1.0;
+      const step = Math.min(0.03, 0.02 * dt / 1000); // <= 2%/s
+      if (target > this._corrApplied + step) this._corrApplied += step;
+      else if (target < this._corrApplied - step) this._corrApplied -= step;
+      else this._corrApplied = target;
+      const wanted = base * this._corrApplied;
       if (Math.abs((this.audio.playbackRate || 1.0) - wanted) > 0.0005) {
         try { this.audio.playbackRate = wanted; } catch (e) {}
       }
       return wanted;
     },
 
-    // Lever 3: converge sub-300ms drift with a small (+/-2..5%) audio playbackRate offset
-    // instead of hard-seeking the audio. Restores 1.0 (relative to video.playbackRate) as
-    // soon as the drift is inside the 80ms deadband. The 300ms ceiling keeps the existing
-    // hard paths (>300ms: watchdog snap; post-seek align) in charge of large corrections.
+    // S4: converge sub-300ms drift with a smooth, proportional audio playbackRate offset.
+    //  - the drift estimate is smoothed (EMA) so watchdog sample quantization cannot fire a
+    //    correction on its own (G3);
+    //  - the band has hysteresis (enter >120ms, exit <45ms) and needs two consecutive samples
+    //    unless the drift is already large, so corrections do not toggle tick after tick (G1);
+    //  - the offset is proportional to the real drift (mag = drift/2.5s, clamped 0.4%..3%) and
+    //    applied through the slew in applyAudioRate, so a correction ramps instead of stepping.
+    // Corrections above 300ms stay with the existing hard paths.
     updateAudioRateCorrection(video, vTime, aTime) {
       const now = Date.now();
-      const drift = aTime - vTime;              // >0: audio ahead of the master clock
-      const absMs = Math.abs(drift) * 1000;
+      const raw = aTime - vTime;                // >0: audio ahead of the master clock
+      // Median of the last 3 samples rejects a single clock/measurement spike, then a light
+      // EMA removes the remaining tick noise. Both are needed before any threshold decision.
+      const hist = this._driftHist;
+      hist.push(raw);
+      if (hist.length > 3) hist.shift();
+      const med = hist.length === 3 ? hist.slice().sort((a, b) => a - b)[1] : raw;
+      this._driftSmooth = (typeof this._driftSmooth === 'number')
+        ? (this._driftSmooth * 0.5 + med * 0.5)
+        : med;
+      const sm = this._driftSmooth;
+      const smMs = Math.abs(sm) * 1000;
       const canCorrect = this.isActive && video && !video.paused && !this._userPaused &&
         !this._isSeeking && !video.seeking && this.audio && !this.audio.seeking &&
         !this._isAudioBuffering && !this._trackEnded && !document.hidden &&
         !this.isAdActive() && (now - (this._lastSeekTime || 0) > 3000);
-      if (!canCorrect || absMs < 80 || absMs > 300) {
+      if (!canCorrect || smMs > 300) {
+        this._driftSmooth = null;
+        this._driftHist = [];
+        this._corrActive = false;
+        this._driftOutsideTicks = 0;
         this._rateCorrection = 1.0;
         this._rateCorrectionUntil = 0;
         return;
       }
-      // Close the observed gap in ~2-3s; clamp the offset to 2-5%.
-      const mag = Math.min(0.05, Math.max(0.02, absMs / 2500));
-      this._rateCorrection = drift > 0 ? (1 - mag) : (1 + mag);
-      this._rateCorrectionUntil = now + 1200;
+      if (!this._corrActive) {
+        if (smMs > 70) {
+          this._driftOutsideTicks = (this._driftOutsideTicks || 0) + 1;
+          // Two consecutive samples (1.5s) unless the drift is already large.
+          if (smMs > 150 || this._driftOutsideTicks >= 2) this._corrActive = true;
+        } else {
+          this._driftOutsideTicks = 0;
+        }
+      } else if (smMs < 35) {
+        this._corrActive = false;
+      }
+      if (!this._corrActive) {
+        this._rateCorrection = 1.0;
+        this._rateCorrectionUntil = 0;
+        return;
+      }
+      const mag = Math.min(0.03, Math.max(0.004, smMs / 2500));
+      this._rateCorrection = sm > 0 ? (1 - mag) : (1 + mag);
+      this._rateCorrectionUntil = now + 2000;
     },
-
     checkSyncWatchdog() {
       if (!isPlayerActiveOnPage()) {
         if (this.isActive || this._isTransitioning || this.pending774) {
