@@ -1243,6 +1243,15 @@
     try {
       if (typeof StudioEngine774 !== 'undefined' && !StudioEngine774.isAdActive()) {
         if (this === StudioEngine774.audio) {
+          const pg = window.__ytssPauseGesture;
+          const userIntent = pg && !pg.wasPaused && (Date.now() - pg.at) < 450;
+          if (IS_FIREFOX && !userIntent && Date.now() < (StudioEngine774._tabReturnGraceUntil || 0)) {
+            // Firefox tab return: a direct slave-audio pause() (page code / mediaSession
+            // fallback) must not stop the audible stream synchronously; defer it like the
+            // video-pause paths so a short player hiccup cannot mute the 774 stream.
+            StudioEngine774.deferAudioPause();
+            return;
+          }
           return origPause.apply(this, args);
         }
         const isMainVideo = this !== StudioEngine774.audio &&
@@ -1258,7 +1267,13 @@
           if (StudioEngine774.isActive) {
             const other = StudioEngine774.audio;
             if (other && !other.paused) {
-              try { origPause.call(other); } catch (e) {}
+              if (IS_FIREFOX && !userPauseIntent && Date.now() < (StudioEngine774._tabReturnGraceUntil || 0)) {
+                // Firefox tab return: a transient player pause must not stop the audible stream
+                // synchronously (the 'pause' handler alone cannot cover this call path).
+                StudioEngine774.deferAudioPause();
+              } else {
+                try { origPause.call(other); } catch (e) {}
+              }
             }
           }
         }
@@ -2635,6 +2650,23 @@
       return (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
     },
     // Engine-internal resume: never yank playback after a user/media-key pause.
+    // Firefox tab-return guard: a transient video pause (player re-buffer / visibility settle)
+    // must not stop the audible 774 stream. Defer the slave-audio pause by 600ms; the deferred
+    // stop is cancelled when the video plays again, and skipped when the player still reports
+    // "playing" (state 1). Used by the video 'pause' handler AND the prototype pause() hook so a
+    // programmatic video.pause() cannot stop the audio synchronously either.
+    deferAudioPause() {
+      if (this._pauseDeferTimer) clearTimeout(this._pauseDeferTimer);
+      this._pauseDeferTimer = setTimeout(() => {
+        this._pauseDeferTimer = null;
+        if (!this.isActive || !this.audio || this.audio.paused || this._userPaused) return;
+        const vNow = getMainVideoElement();
+        if (vNow && !vNow.paused && !vNow.ended) return;
+        if (document.getElementById('movie_player')?.getPlayerState?.() === 1) return;
+        try { this.audio.pause(); } catch (e) {}
+      }, 600);
+    },
+
     _tryPlayAudio() {
       if (this._userPaused || Date.now() < this._pauseLockUntil) return;
       if (!this.isActive || !this.audio || this.isAdActive()) return;
@@ -3550,6 +3582,12 @@
         }
 
         if (e.type === 'play' || e.type === 'playing' || e.type === 'loadedmetadata' || e.type === 'canplay') {
+          // A deferred (Firefox tab-return) audio pause must be cancelled as soon as the video
+          // is actually playing again.
+          if (this._pauseDeferTimer && (e.type === 'play' || e.type === 'playing')) {
+            clearTimeout(this._pauseDeferTimer);
+            this._pauseDeferTimer = null;
+          }
           if (!this.isActive && !this.isAdActive()) {
             const curVid = document.getElementById('movie_player')?.getVideoData?.()?.video_id || (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
             if (curVid && isCurrentWatchVideo(curVid) && !confirmedNo774Videos.has(curVid)) {
@@ -3637,7 +3675,12 @@
           if (userPauseIntent) {
             this.lockPause();
           } else if (!this._userPaused && this.audio && !this.audio.paused) {
-            try { this.audio.pause(); } catch (e) {}
+            if (IS_FIREFOX && Date.now() < (this._tabReturnGraceUntil || 0)) {
+              // Firefox tab return: give the video 600ms to resume before stopping the audio.
+              this.deferAudioPause();
+            } else {
+              try { this.audio.pause(); } catch (e) {}
+            }
           }
         } else if (e.type === 'error') {
           console.log(TAG, '[StudioEngine774] Main video element error -> Halting audio stream');
@@ -4362,6 +4405,9 @@
       if (!this.isActive || !this.audio || this.isAdActive()) return;
       const video = getMainVideoElement();
       if (!video) return;
+      // Firefox: short grace window so a transient YouTube player pause / re-buffer right after
+      // the tab returns cannot stop the audible 774 stream (see the video 'pause' handler).
+      if (IS_FIREFOX) this._tabReturnGraceUntil = Date.now() + 2500;
 
       this._silenceElement(video);
       this.syncVol(video);
@@ -4434,6 +4480,12 @@
         setTimeout(() => { this._isInternalVideoSync = false; }, 250);
       } else if (video.paused && !this.audio.paused) {
         this.audio.pause();
+      } else if (IS_FIREFOX && !video.paused && this.audio.paused && !this.audio.ended &&
+                 !this._userPaused && !this.isAdActive()) {
+        // Firefox: this branch used to be unreachable (audio.paused is always true in this
+        // else-chain), so nothing resumed the slave audio once the tab was back and the master
+        // video was playing again. Resume it now; a large drift is then handled by the watchdog.
+        this._tryPlayAudio();
       }
     },
 
@@ -4645,6 +4697,13 @@
       }
 
       if (video.paused) {
+        // Firefox tab-return grace: a transient player pause right after the tab returns must
+        // not stop the audible stream. The video 'pause' handler defers too; this covers the
+        // 750ms watchdog tick, which used to stop the audio a few ms after that pause.
+        if (IS_FIREFOX && Date.now() < (this._tabReturnGraceUntil || 0) &&
+            document.getElementById('movie_player')?.getPlayerState?.() !== 2) {
+          return;
+        }
         if (video.ended) {
           if (this.isLoopActive()) {
             this._trackEnded = false;
