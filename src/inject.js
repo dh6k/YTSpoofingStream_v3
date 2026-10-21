@@ -2004,6 +2004,7 @@
       if (!session.hasInit || bufEndSec === null) {
         targetMs = Math.max(0, Math.floor(curSec * 1000));
         session.reachedEof = false;
+        session.emptyResponses = 0;
       } else {
         const durSec = session.durationSec || (video && video.duration > 0 ? video.duration : 0);
         if (session.reachedEof || (durSec > 0 && bufEndSec >= durSec - 0.8)) {
@@ -2114,13 +2115,29 @@
               StudioEngine774.stopAndUnmute('TV UMP SabrError');
             }
           } else if (session.hasInit && targetMs > 5000) {
-            session.reachedEof = true;
+            // Firefox: a zero-segment response mid-stream is NOT proof of EOF. SABR can answer
+            // with only a NextRequestPolicy part (empty prime / downgrade / transient server
+            // state). Declaring EOF here stopped the pump, the 30s lookahead drained and the
+            // audible <audio> fired 'waiting' (~0.8s silence) before an accidental recovery that
+            // depended on the video clock passing the buffered end. Only stop at the known
+            // duration; otherwise the 250ms timer retries the same target. Chrome is unchanged.
+            if (!IS_FIREFOX) {
+              session.reachedEof = true;
+            } else {
+              const durSec = session.durationSec || (video && video.duration > 0 ? video.duration : 0);
+              session.emptyResponses = (session.emptyResponses || 0) + 1;
+              if ((durSec > 0 && targetMs >= durSec * 1000 - 200) ||
+                  (!(durSec > 0) && session.emptyResponses >= 6)) {
+                session.reachedEof = true;
+              }
+            }
           }
           return;
         }
 
         session.errorCount = 0;
         session.redirectCount = 0;
+        session.emptyResponses = 0;
         for (const seg of demuxed.segments) {
           if (seg.isInit) {
             const initInfo = this.opusInitChannelInfo(seg.data);
@@ -2238,6 +2255,7 @@
         session.lastContigEndMs = 0;
         session.lastAppendedSeq = -1;
         session.reachedEof = false;
+        session.emptyResponses = 0;
         session.endedStream = false;
         if (session.hasInit && session.appendQueue.length > 0) {
           // Drop chunks queued by the superseded request (also when a flush is currently in progress;
