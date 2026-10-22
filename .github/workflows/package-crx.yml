@@ -45,8 +45,11 @@ jobs:
           cp src/background.js src/bridge.js src/inject.js \
              src/popup.html src/popup.js src/harvester.html src/harvester.js \
              src/ytm_harvester_cs.js dist/src/
-          cp assets/icon16.png assets/icon48.png assets/icon128.png assets/logo.svg dist/assets/
-          cp locales/*.json dist/locales/
+          # Runtime payload only, same list as tools/pack-firefox.sh: logo.svg is README
+          # branding and locales/template.json is the contributor template (never loaded).
+          cp assets/icon16.png assets/icon48.png assets/icon128.png dist/assets/
+          cp locales/en.json locales/vi.json locales/ja.json locales/ru.json \
+             locales/zh-cn.json locales/zh-tw.json dist/locales/
           node -e "
             const fs=require('fs');
             const m=JSON.parse(fs.readFileSync('dist/manifest.json','utf8'));

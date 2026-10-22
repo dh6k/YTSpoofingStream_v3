@@ -316,9 +316,22 @@
       const enterCodeEl = $('#tvEnterCodeText');
 
       if (enterCodeEl) {
-        enterCodeEl.innerHTML = t('tvEnterCode', {
-          url: '<a href="https://youtube.com/activate" target="_blank" style="color: var(--accent);">youtube.com/activate</a>'
-        });
+        // Build the activation link as DOM instead of substituting HTML into a translated
+        // string: no innerHTML in the popup, and the URL/label cannot be injected.
+        const marker = '\u0000';
+        const parts = t('tvEnterCode', { url: marker }).split(marker);
+        enterCodeEl.textContent = '';
+        if (parts.length === 2) {
+          const link = document.createElement('a');
+          link.href = 'https://youtube.com/activate';
+          link.target = '_blank';
+          link.rel = 'noopener';
+          link.style.color = 'var(--accent)';
+          link.textContent = 'youtube.com/activate';
+          enterCodeEl.append(parts[0], link, parts[1]);
+        } else {
+          enterCodeEl.textContent = parts.join('');
+        }
       }
 
       if (!lastAuth) {

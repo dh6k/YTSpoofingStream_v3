@@ -36,17 +36,21 @@ New-Item -ItemType Directory -Path (Join-Path $stage "src") | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $stage "assets") | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $stage "locales") | Out-Null
 
+# Runtime payload only (mirrors pack-firefox.sh): logo.svg is README branding and
+# locales/template.json is the contributor template; neither is referenced at runtime.
 $files = @(
   "manifest.json",
   "src/background.js", "src/bridge.js", "src/inject.js",
   "src/popup.html", "src/popup.js", "src/harvester.html", "src/harvester.js",
   "src/ytm_harvester_cs.js",
-  "assets/icon16.png", "assets/icon48.png", "assets/icon128.png", "assets/logo.svg"
+  "assets/icon16.png", "assets/icon48.png", "assets/icon128.png"
 )
 foreach ($f in $files) {
   Copy-Item (Join-Path $root $f) (Join-Path $stage $f)
 }
-Copy-Item (Join-Path $root "locales\*.json") (Join-Path $stage "locales")
+Get-ChildItem (Join-Path $root "locales\*.json") |
+  Where-Object { $_.Name -ne "template.json" } |
+  Copy-Item -Destination (Join-Path $stage "locales")
 
 $key = Join-Path $root "key.pem"
 $chromeArgs = @("--pack-extension=$stage")
