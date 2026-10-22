@@ -12,9 +12,14 @@
   // posted back to it.
   const isFramed = window.self !== window.top;
   if (!isFramed) return;
+  // Fail-closed parent gate: the harvester may only run as a direct child of an extension page.
+  // Firefox exposes location.ancestorOrigins (also in cross-origin frames); if it is unavailable,
+  // does not describe exactly one direct parent, or that parent is not an extension origin, abort
+  // before any hook, poll or postMessage. There is no '*' targetOrigin on any path.
   const ancestors = location.ancestorOrigins;
-  const PARENT_ORIGIN = ancestors && ancestors.length === 1 ? ancestors[0] : '*';
-  if (ancestors && !PARENT_ORIGIN.startsWith('chrome-extension://') && !PARENT_ORIGIN.startsWith('moz-extension://')) return;
+  if (!ancestors || ancestors.length !== 1) return;
+  const PARENT_ORIGIN = String(ancestors[0]);
+  if (!PARENT_ORIGIN.startsWith('chrome-extension://') && !PARENT_ORIGIN.startsWith('moz-extension://')) return;
 
   const TAG = '[YTM-Harvester]';
   const urlVid = new URLSearchParams(location.search).get('v');
