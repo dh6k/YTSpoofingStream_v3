@@ -7046,6 +7046,15 @@
       host.appendChild(panel);
     },
 
+    // Stats-for-nerds values come from page/player data (video id, cpn, mime, src scheme).
+    // Escape them before they reach innerHTML: row() also renders the DASH cell, which is
+    // trusted literal markup, so escaping stays at the call sites.
+    escHtml(v) {
+      return String(v == null ? '' : v).replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    },
+
     row(label, value) {
       return `<div style="margin:1px 0;"><span style="display:inline-block;width:110px;color:#ffb84d;">${label}:</span><span data-v>${value}</span></div>`;
     },
@@ -7125,13 +7134,13 @@
       const bw = this.bandwidthKbps(v);
 
       body.innerHTML = this.toSafeHtml([
-        this.row('Video ID', videoId),
-        this.row('Dimensions', dimensions),
-        this.row('Resolution', resLabel),
-        this.row('Volume', vol),
-        this.row('Stream Type', streamType),
-        this.row('CPN', cpn),
-        this.row('Mime Type', mime),
+        this.row('Video ID', this.escHtml(videoId)),
+        this.row('Dimensions', this.escHtml(dimensions)),
+        this.row('Resolution', this.escHtml(resLabel)),
+        this.row('Volume', this.escHtml(vol)),
+        this.row('Stream Type', this.escHtml(streamType)),
+        this.row('CPN', this.escHtml(cpn)),
+        this.row('Mime Type', this.escHtml(mime)),
         this.row('DASH', `<span style="color:${is774 ? '#ff4d4d' : '#eee'}">${dash}</span>`),
         `<div style="margin:3px 0 0;"><span style="display:inline-block;width:110px;color:#ffb84d;">Bandwidth:</span>`,
         `<span style="display:inline-block;width:120px;height:8px;border:1px solid #666;vertical-align:middle;margin-right:6px;">`,
