@@ -2212,8 +2212,15 @@
             if (session.seekTargetSec !== null) {
               session.seekTargetSec = null;
             }
-            if (session.lastAppendedSeq === seg.seq) {
+            // P0.3: a re-requested SABR response can redeliver clusters that were already
+            // appended (1/33 straight runs in round 3). seq is monotonic per stream, so anything
+            // at or below the last appended seq is a duplicate: skip it instead of appending it a
+            // second time. The continuity watermark still advances so the next request target
+            // stays right. seek resets the watermark to -1 (see onSeek).
+            if (session.lastAppendedSeq >= 0 && seg.seq <= session.lastAppendedSeq) {
+              session.dupsSkipped = (session.dupsSkipped || 0) + 1;
               session.lastContigEndMs = Math.max(session.lastContigEndMs || 0, seg.startMs + seg.durMs);
+              console.log(TAG, `[UmpMse774] Skipped duplicate cluster seq=${seg.seq} (last appended=${session.lastAppendedSeq}, skipped=${session.dupsSkipped})`);
             } else {
               session.appendQueue.push(seg.data);
               session.lastAppendedSeq = seg.seq;
@@ -2626,6 +2633,10 @@
     _driftSmooth: null,
     _driftHist: [],
     _driftOutsideTicks: 0,
+    // P0.1: one-shot startup alignment state for the 300-450ms dead zone (see updateAudioRateCorrection).
+    _startupAlignUntil: 0,
+    _startupAlignDone: false,
+    _startupAlignTicks: 0,
     _lastRateApplyAt: 0,
     _baseUserRate: 1.0,
     _inSyncVol: false,
@@ -4647,7 +4658,8 @@
     //    unless the drift is already large, so corrections do not toggle tick after tick (G1);
     //  - the offset is proportional to the real drift (mag = drift/2.5s, clamped 0.4%..3%) and
     //    applied through the slew in applyAudioRate, so a correction ramps instead of stepping.
-    // Corrections above 300ms stay with the existing hard paths.
+    // Corrections above 300ms stay with the existing hard paths, except the one-shot startup
+    // alignment below which closes the 300-450ms band that neither path covered (P0.1).
     updateAudioRateCorrection(video, vTime, aTime) {
       const now = Date.now();
       const raw = aTime - vTime;                // >0: audio ahead of the master clock
@@ -4666,7 +4678,45 @@
         !this._isSeeking && !video.seeking && this.audio && !this.audio.seeking &&
         !this._isAudioBuffering && !this._trackEnded && !document.hidden &&
         !this.isAdActive() && (now - (this._lastSeekTime || 0) > 3000);
-      if (!canCorrect || smMs > 300) {
+      if (!canCorrect) {
+        this._driftSmooth = null;
+        this._driftHist = [];
+        this._corrActive = false;
+        this._driftOutsideTicks = 0;
+        this._startupAlignTicks = 0;
+        this._rateCorrection = 1.0;
+        this._rateCorrectionUntil = 0;
+        return;
+      }
+      // P0.1: a startup residual above 300ms has no correction path at all: the S4 rate band
+      // stops at 300ms, the hard audio resync starts above 450ms and only helps audio that is
+      // BEHIND, and the wholesale snap only runs above 1500ms. One round-3 run therefore sat at
+      // 374ms for the whole video. During the first seconds of a stream, once the smoothed
+      // residual has stayed above 300ms for two ticks and the MSE buffer already covers the
+      // master time, snap the slave <audio> onto the video clock once. Audio-only, like every
+      // other sync path; the S4 rate controller (70/35 hysteresis) is untouched at and below 300ms.
+      if (!this._startupAlignDone && now < (this._startupAlignUntil || 0) && smMs >= 300 && smMs <= 1500) {
+        this._startupAlignTicks = (this._startupAlignTicks || 0) + 1;
+        if (this._startupAlignTicks >= 2 && this.isTimeBuffered(this.audio, vTime)) {
+          this._startupAlignDone = true;
+          this._lastSeekTime = now;
+          try { this.audio.currentTime = vTime; } catch (e) {}
+          this._lastAudioTime = vTime;
+          this._lastAudioAdvance = now;
+          console.log(TAG, `[StudioEngine774] Startup align: ${(sm * 1000).toFixed(0)}ms residual inside the 300-450ms dead zone -> snapped audio to video ${vTime.toFixed(2)}s`);
+          this._driftSmooth = null;
+          this._driftHist = [];
+          this._corrActive = false;
+          this._driftOutsideTicks = 0;
+          this._startupAlignTicks = 0;
+          this._rateCorrection = 1.0;
+          this._rateCorrectionUntil = 0;
+          return;
+        }
+      } else if (smMs < 300 || smMs > 1500) {
+        this._startupAlignTicks = 0;
+      }
+      if (smMs > 300) {
         this._driftSmooth = null;
         this._driftHist = [];
         this._corrActive = false;
@@ -5037,6 +5087,10 @@
       }
       this._initialMetaSynced = false;
       this.isActive = true;
+      // P0.1: open the one-shot startup alignment window for this stream.
+      this._startupAlignUntil = Date.now() + 15000;
+      this._startupAlignDone = false;
+      this._startupAlignTicks = 0;
       this._reconnectAttempts = 0;
       this._isAudioBuffering = false;
       this._isSeeking = false;
