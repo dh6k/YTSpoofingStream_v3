@@ -221,6 +221,18 @@ function stopPollingToken(clientType) {
     if (session.timerId) clearTimeout(session.timerId);
     oauthPollSessions[key] = null;
   }
+  syncKeepalive();
+}
+
+// The 20s keep-alive alarm exists only to keep this page alive while an OAuth
+// device-code poll is in flight: that poll is a chain of setTimeout() calls that
+// would be lost if the page suspends mid-login. Nothing else needs it — session
+// DNR rules outlive the page, and a harvest self-terminates after 8s while its
+// harvester messages already keep the page awake.
+function syncKeepalive() {
+  const active = Object.values(oauthPollSessions).some(Boolean);
+  if (active) chrome.alarms.create('ytss-keepalive', { periodInMinutes: 1 / 3 });
+  else Promise.resolve(chrome.alarms.clear('ytss-keepalive')).catch(() => {});
 }
 
 async function requestDeviceCode(clientType = 'TVHTML5') {
@@ -247,6 +259,7 @@ async function startPollingToken(clientType, device_code, interval = 5, expiresI
   const deadline = Date.now() + ttlSec * 1000;
   const session = { timerId: null, cancelled: false };
   oauthPollSessions[key] = session;
+  syncKeepalive();
 
   return new Promise((resolve, reject) => {
     const scheduleNext = () => {
@@ -415,6 +428,34 @@ async function updateDnrRules({ removeRuleIds = [], addRules = [] }) {
     return 'dynamic';
   }
   throw new Error('declarativeNetRequest session/dynamic rule APIs unavailable');
+}
+
+// Session DNR rules live in the browser's own rule store, not in this page: they
+// survive the background page being suspended (Firefox event page / Chrome MV3
+// worker) and are only dropped on browser restart, extension reload/update or an
+// enabled-toggle. Re-installing all of them on every wake was therefore wasted
+// work; explicit lifecycle events install them and the first DNR-dependent
+// request verifies them once per wake before it goes out.
+let _dnrVerified = null;
+
+async function verifyDnrRules() {
+  const cfg = await chrome.storage.local.get('enabled');
+  if (cfg.enabled === false) {
+    _dnrVerified = null; // re-check after it is re-enabled
+    return;
+  }
+  const rules = await getDnrRules();
+  if (!rules.some(r => r.id === ORIGIN_RULE_ID)) await setupStaticRules();
+}
+
+function ensureDnrRules() {
+  if (!_dnrVerified) {
+    _dnrVerified = verifyDnrRules().catch(e => {
+      _dnrVerified = null;
+      console.warn(TAG, '[DNR] rule verification failed:', e);
+    });
+  }
+  return _dnrVerified;
 }
 
 async function setupStaticRules() {
@@ -1228,6 +1269,11 @@ function isValid774Url(raw) {
 
 function handleRuntimeMessage(msg, sender, sendResponse) {
   if (!msg || sender?.id !== chrome.runtime.id) return;
+  // Any message is a wake-up: start the one-per-wake rule check here so a page that
+  // is about to fetch media (DNR-sensitive, no extension request of its own) finds
+  // the spoofing rules in place. FETCH_HQ below awaits the same promise before it
+  // sends its own request; the handler does not wait for it.
+  ensureDnrRules();
 
   if (msg.type === 'OFFSCREEN_HARVEST_SUCCESS') {
     if (!isFromHarvester(sender) || !isValid774Url(msg.url)) {
@@ -1383,6 +1429,9 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
     if (msg.context) setPageContext(msg.context);
 
     (async () => {
+      // The spoofed client headers ride on session DNR rules; make sure they are in
+      // place before the first request of this wake goes out (no-op once verified).
+      await ensureDnrRules();
       const storage = await chrome.storage.local.get(['preferredClient', 'enabled', 'operationMode']);
       if (storage.enabled === false) {
         sendResponse({ success: false, results: [], error: 'disabled' });
@@ -1803,9 +1852,6 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   }
 });
 
-// Also run on every SW wake-up. Session rules and the keepalive alarm are both
-// idempotent (rules are replaced by ID, the alarm is keyed by name), so re-running
-// here restores state after Chrome evicts the worker without waiting for a
-// re-install or browser restart.
-setupStaticRules();
-chrome.alarms.create('ytss-keepalive', { periodInMinutes: 1 / 3 });
+// No setupStaticRules() / alarm here anymore: rules are installed by onInstalled,
+// onStartup and the enabled-toggle, verified before the first DNR-dependent request,
+// and the keep-alive alarm only exists while an OAuth device-code poll is running.
