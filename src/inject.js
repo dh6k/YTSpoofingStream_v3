@@ -5327,6 +5327,21 @@
             this._lastAudioAdvance = Date.now();
             return;
           }
+          // The <audio> can be stuck in an unbuffered MSE gap far behind a playing <video>:
+          // the old gap branch only handled a <3 s gap, and the 8-15 s branches either called
+          // _tryPlayAudio (a no-op for a waiting element) or reconnected at the OLD audio time.
+          // That left a permanent 20 s echo. Re-follow the master clock and fetch its cluster.
+          if (vTime > aTime + 3.0) {
+            console.log(TAG, `[StudioEngine774 Watchdog] Audio stuck ${(vTime - aTime).toFixed(2)}s behind the master at ${aTime.toFixed(2)}s -> re-following video ${vTime.toFixed(2)}s`);
+            PlaybackArbiter.seekAudio(vTime, 'watchdog-refollow');
+            if (UmpMseController774.isActive) {
+              UmpMseController774.onSeek(vTime, { userSeek: false });
+            }
+            this._tryPlayAudio();
+            this._lastAudioTime = vTime;
+            this._lastAudioAdvance = Date.now();
+            return;
+          }
           if (stalledDuration > 8000) {
             console.log(TAG, `[StudioEngine774 Watchdog] Audio frozen at ${aTime.toFixed(2)}s for ${(stalledDuration / 1000).toFixed(1)}s (video at ${vTime.toFixed(2)}s). Auto-recovering...`);
             this._lastAudioAdvance = Date.now();
