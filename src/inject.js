@@ -8245,10 +8245,14 @@
           ? 'Studio Master AAC 141 (256kbps Full Fidelity)'
           : t(isStudio ? 'badgeTooltipStudio' : 'badgeTooltipNative', { itag, bitrate, method }))
         : t('badgeTooltip251');
-      if (el.textContent !== text) el.textContent = text;
-      if (el.style.color !== color) el.style.color = color;
-      if (el.style.borderColor !== border) el.style.borderColor = border;
-      if (el.title !== title) el.title = title;
+      const sig = text + '|' + color + '|' + border + '|' + title;
+      if (el._ytssPaintSig !== sig || el.textContent !== text) {
+        el._ytssPaintSig = sig;
+        el.textContent = text;
+        el.style.color = color;
+        el.style.borderColor = border;
+        el.title = title;
+      }
     },
 
     // K round (P2.9): the 1 Hz refresh must not write DOM while playback is deliberately
