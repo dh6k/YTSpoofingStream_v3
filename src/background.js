@@ -438,6 +438,45 @@ async function updateDnrRules({ removeRuleIds = [], addRules = [] }) {
 // request verifies them once per wake before it goes out.
 let _dnrVerified = null;
 
+// Rule ids this extension creates. Dynamic rules are the Firefox fallback store for the
+// same rule set, and other extensions/users may keep unrelated rules there, so a teardown
+// may only ever remove ids listed here (plus the generated per-client ranges and the
+// _ytss_c= marker). Upstream 5468b23 wipes the whole dynamic store; on Firefox that also
+// deletes foreign rules and the fallback rules themselves, so that hunk is NOT ported.
+const FORK_STATIC_RULE_IDS = new Set([9000, 9193, 9195, 9196, 9197, 9198, 9199, 9200, 9201, 9300, 9500, 9501]);
+function isForkOwnedRule(rule) {
+  if (!rule || typeof rule.id !== 'number') return false;
+  if (FORK_STATIC_RULE_IDS.has(rule.id)) return true;
+  if (rule.id >= 9100 && rule.id < 9200) return true; // per-client media UA rules
+  if (rule.id >= 9400 && rule.id < 9500) return true; // per-client API UA rules
+  try { return JSON.stringify(rule.condition || {}).includes('_ytss_c='); } catch (e) { return false; }
+}
+
+// Disable teardown (adapted from upstream 5468b23): stop the in-flight harvest, close the
+// Firefox harvester host, and drop cached 774 URLs so a later re-enable cannot replay a
+// stale signed stream for the wrong track.
+async function teardownForDisable(reason) {
+  try {
+    if (activeHarvestSession) {
+      const s = activeHarvestSession;
+      s.cancelled = true;
+      try { s.resolve({ ok: false, cancelled: true }); } catch (e) {}
+      if (s.timer) clearTimeout(s.timer);
+      activeHarvestSession = null;
+    }
+    try { pendingHarvests.clear(); } catch (e) {}
+    HarvesterPlatform.send({ type: 'OFFSCREEN_STOP_HARVEST' }).catch(() => {});
+    scheduleOffscreenClose(0);
+    confirmedNo774Videos.clear();
+    const all = await chrome.storage.session.get(null);
+    const keys = Object.keys(all || {}).filter(k => k.startsWith('hq_') || k.startsWith('tvctx_') || k.startsWith('no774_'));
+    if (keys.length > 0) await chrome.storage.session.remove(keys);
+    console.log(TAG, 'Extension disabled (' + reason + '): harvest stopped, session 774 cache wiped.');
+  } catch (e) {
+    console.warn(TAG, '[Teardown] disable cleanup failed:', e);
+  }
+}
+
 async function verifyDnrRules() {
   const cfg = await chrome.storage.local.get('enabled');
   if (cfg.enabled === false) {
@@ -466,13 +505,15 @@ async function setupStaticRules() {
       const existingIds = existingRules.map(r => r.id);
 
       if (storage.enabled === false) {
-        if (existingIds.length > 0) {
+        const ownedIds = existingRules.filter(isForkOwnedRule).map(r => r.id);
+        if (ownedIds.length > 0) {
           await updateDnrRules({
-            removeRuleIds: [...new Set(existingIds)],
+            removeRuleIds: [...new Set(ownedIds)],
             addRules: [],
           });
         }
-        console.log(TAG, 'Extension is DISABLED: Wiped all declarativeNetRequest rules.');
+        console.log(TAG, 'Extension is DISABLED: removed ' + ownedIds.length + ' rule(s) owned by this extension (' +
+          (existingIds.length - ownedIds.length) + ' left in place).');
         return;
       }
 
@@ -772,6 +813,7 @@ async function setupStaticRules() {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.enabled !== undefined) {
     setupStaticRules();
+    if (changes.enabled.newValue === false) teardownForDisable('enabled=false');
   }
   if (area === 'local' && changes.operationMode !== undefined) {
     console.log(TAG, `[Settings] Operation mode changed to ${changes.operationMode.newValue}, clearing SW session cache`);
@@ -1805,8 +1847,9 @@ chrome.runtime.onStartup.addListener(() => {
   setupStaticRules();
 });
 
-chrome.alarms.onAlarm.addListener((alarm) => {
+chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'ytss-keepalive') {
+    try { const cfg = await chrome.storage.local.get('enabled'); if (cfg.enabled === false) return; } catch (e) {}
     getDnrRules().then(rules => {
       const hasOriginRule = rules.some(r => r.id === ORIGIN_RULE_ID);
       if (!hasOriginRule) {
@@ -1827,6 +1870,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 const HQ_CACHE_TTL_MS = 3600000;
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   try {
+    const cfg = await chrome.storage.local.get('enabled');
+    if (cfg.enabled === false) return;
     const tab = await chrome.tabs.get(tabId);
     if (!tab.url || !tab.url.includes('youtube.com/watch')) return;
 

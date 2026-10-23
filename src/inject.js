@@ -18,6 +18,26 @@
   const ORIGINAL_XHR_OPEN = XMLHttpRequest.prototype.open;
   const ORIGINAL_XHR_SEND = XMLHttpRequest.prototype.send;
 
+  // Live disable must hand the page back *its own* objects, not just gate our wrappers
+  // (adapted from upstream 5468b23's hook/unhook pairs). Every replaced property is
+  // registered before it is installed, so both the original behaviour and the hooked
+  // behaviour can be re-defined on demand without a reload.
+  const HOOK_TARGETS = [];
+  function registerHookTarget(key, obj, prop) {
+    if (!obj) return;
+    let desc = null, value;
+    try { desc = Object.getOwnPropertyDescriptor(obj, prop); value = obj[prop]; } catch (e) {}
+    HOOK_TARGETS.push({ key, obj, prop, desc, value });
+  }
+  registerHookTarget('fetch', window, 'fetch');
+  registerHookTarget('xhrOpen', XMLHttpRequest.prototype, 'open');
+  registerHookTarget('xhrSend', XMLHttpRequest.prototype, 'send');
+  registerHookTarget('play', HTMLMediaElement.prototype, 'play');
+  registerHookTarget('pause', HTMLMediaElement.prototype, 'pause');
+  registerHookTarget('volume', HTMLMediaElement.prototype, 'volume');
+  registerHookTarget('muted', HTMLMediaElement.prototype, 'muted');
+  registerHookTarget('swRegister', navigator.serviceWorker, 'register');
+
   const MODES = { AAC: 'aac_only', OPUS_HQ: 'opus_hq', HIGHEST: 'highest' };
 
   // ─── ITAG DISGUISE TABLE ──────────────────────────────────────────
@@ -120,18 +140,40 @@
       try { window.postMessage({ type: 'YTSS_STOP_HARVEST' }, '*'); } catch (e) {}
       pendingFetches.clear();
       if (typeof StudioEngine774 !== 'undefined') StudioEngine774.stopAndUnmute('Extension Disabled');
-      const container = document.getElementById('ytss-vol-container');
-      if (container) container.style.display = 'none';
-      if (typeof PlayerBadgeUI !== 'undefined') PlayerBadgeUI.inject();
+      // Restore the video element before the DOM teardown hides our overlay.
       if (typeof applyAudioOnlyState === 'function') applyAudioOnlyState();
+      // Full teardown (adapted from upstream 5468b23): hand the page back its own prototypes
+      // and network entry points, drop every injected node, and clear the per-session 774
+      // state so a later re-enable cannot resurrect a stale stream for the wrong track.
+      restorePageHooks();
+      const removedNodes = teardownInjectedDom();
+      hqCache.clear();
+      loudnessDbMap.clear();
+      failedFetches.clear();
+      reloadedVideos.clear();
+      confirmedNo774Videos.clear();
+      sabrRewrite.on = false;
+      sabrRewrite.videoId = null;
+      sabrRewrite.lastModified = null;
+      sabrRewrite.verified774 = false;
+      sabrRewrite.downgradedVideoId = null;
+      status.downloadUrl = null;
+      try {
+        for (let i = window.sessionStorage.length - 1; i >= 0; i--) {
+          const k = window.sessionStorage.key(i);
+          if (k && k.startsWith('ytss_hq_')) window.sessionStorage.removeItem(k);
+        }
+      } catch (e) {}
       status.activeMethod = 'original';
       status.activeAudioItag = 251;
       status.fallbackReason = 'Extension Disabled';
       status.bestAudioInfo = 'Extension Disabled';
       report();
+      console.log(TAG, `[Teardown] Extension disabled: ${removedNodes} injected node(s) removed, transport state cleared.`);
     } else {
       const wasDisabled = !lastEnabled;
       lastEnabled = true;
+      reinstallPageHooks();
       if (typeof StudioEngine774 !== 'undefined') StudioEngine774.init();
       const container = document.getElementById('ytss-vol-container');
       if (container) container.style.display = 'inline-flex';
@@ -8011,11 +8053,50 @@
     }
   };
 
-  // Initialize Engines & UI Hooks
-  StudioEngine774.init();
-  StatsForNerdsSpoofer.init();
-  InPlayerSettingsUI.init();
-  PlayerBadgeUI.inject();
+  // Snapshot the installed wrappers so a live disable can restore the page's originals and
+  // a re-enable can put the hooks back without a reload (adapted from upstream 5468b23).
+  const HOOKED_DESCS = {};
+
+  function restorePageHooks() {
+    let restored = 0;
+    for (const t of HOOK_TARGETS) {
+      try {
+        if (t.desc) Object.defineProperty(t.obj, t.prop, t.desc);
+        else if (typeof t.value !== 'undefined') t.obj[t.prop] = t.value;
+        else delete t.obj[t.prop];
+        restored++;
+      } catch (e) {}
+    }
+    console.log(TAG, `[Teardown] Restored ${restored} page hook(s): fetch, XHR, HTMLMediaElement, serviceWorker.register.`);
+  }
+
+  function reinstallPageHooks() {
+    for (const t of HOOK_TARGETS) {
+      const d = HOOKED_DESCS[t.key];
+      if (!d) continue;
+      try { Object.defineProperty(t.obj, t.prop, d); } catch (e) {}
+    }
+  }
+
+  // Remove every node this extension injected (badges, volume container, SFN panel, style).
+  function teardownInjectedDom() {
+    let removed = 0;
+    try {
+      document.querySelectorAll('[id^="ytss-"]').forEach(el => {
+        try { el.remove(); removed++; } catch (e) {}
+      });
+    } catch (e) {}
+    return removed;
+  }
+
+  // Initialize Engines & UI Hooks (gated: a page that loads while the extension is
+  // disabled must not inject any UI node — upstream 5468b23's boot-block gate).
+  if (S.enabled) {
+    StudioEngine774.init();
+    StatsForNerdsSpoofer.init();
+    InPlayerSettingsUI.init();
+    PlayerBadgeUI.inject();
+  }
   window.__ytssUpdateBadge = () => PlayerBadgeUI.update();
   window.__ytssToggleSfn = (force) => StatsForNerdsSpoofer.openNativeOrClassic(force);
 
@@ -8033,11 +8114,11 @@
 
   ['DOMContentLoaded', 'yt-navigate-finish', 'yt-page-data-updated'].forEach(evt => {
     document.addEventListener(evt, () => {
+      applyAudioOnlyState();
+      if (!S.enabled) return;
       PlayerBadgeUI.inject();
       // Burst inject so the chips land with the bar, not 1.5s later
       [0, 50, 150, 400, 900].forEach((ms) => setTimeout(() => PlayerBadgeUI.inject(), ms));
-      applyAudioOnlyState();
-      if (!S.enabled) return;
       StudioEngine774.init();
       StatsForNerdsSpoofer.init();
       const currentVid = getVideoIdFromUrl();
@@ -8069,8 +8150,10 @@
   });
 
   setInterval(() => {
-    PlayerBadgeUI.inject();
-    StudioEngine774.hookPlayer();
+    if (S.enabled) {
+      PlayerBadgeUI.inject();
+      StudioEngine774.hookPlayer();
+    }
     if (!isPlayerActiveOnPage() && (StudioEngine774.isActive || StudioEngine774._isTransitioning || StudioEngine774.pending774)) {
       StudioEngine774.stopAndUnmute('Navigated away from watch page');
     }
@@ -8577,6 +8660,11 @@
     fetchAllHQAudio: (vid, opts) => fetchAllHQAudio(vid, opts),
     prewarmCache: (vid, opts) => prewarmCache(vid, opts)
   };
+
+  // Snapshot every installed wrapper now that fetch/XHR are in place too.
+  for (const t of HOOK_TARGETS) {
+    try { HOOKED_DESCS[t.key] = Object.getOwnPropertyDescriptor(t.obj, t.prop) || null; } catch (e) { HOOKED_DESCS[t.key] = null; }
+  }
 
   console.log(TAG, 'Injected — Pre-warm + ytplayer.config + ITAG disguise + ForceReload active');
 })();

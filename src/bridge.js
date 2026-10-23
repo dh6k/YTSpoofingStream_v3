@@ -139,15 +139,26 @@ window.addEventListener('message', (event) => {
 
 // SW → MAIN world: immediate HQ upgrade
 // Listen for messages from background/popup to forward to the page
+// Relays are gated on the enabled flag (adapted from upstream 5468b23): a disabled
+// extension must not push an HQ upgrade / player command into a live page.
+function postIfEnabled(msg) {
+  try {
+    chrome.storage.local.get('enabled', (cfg) => {
+      if (cfg && cfg.enabled === false) return;
+      window.postMessage(msg, '*');
+    });
+  } catch (e) {}
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'YTSS_SW_TRIGGER' || msg.type === 'YTSS_DOWNLOAD_AUDIO' || msg.type === 'YTSS_SET_AUDIO_ONLY') {
-    window.postMessage(msg, '*');
+    postIfEnabled(msg);
   }
 });
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'YTSS_TRIGGER_UPGRADE') {
-    window.postMessage({ type: 'YTSS_TRIGGER_UPGRADE', videoId: msg.videoId }, '*');
+    postIfEnabled({ type: 'YTSS_TRIGGER_UPGRADE', videoId: msg.videoId });
   }
 });
 
