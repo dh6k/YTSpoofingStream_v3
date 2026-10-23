@@ -1276,6 +1276,21 @@
   const origPlay = HTMLMediaElement.prototype.play;
   const origPause = HTMLMediaElement.prototype.pause;
   window.__ytssPauseGesture = { at: 0, wasPaused: true };
+  // Bug 7 (Firefox): a trusted press is LATCHED until a state change consumes it. The old
+  // 450ms window expired while the player was still dispatching its own pause (tab-return
+  // grace, V3 chrome), so a deliberate pause fell through to the environmental-pause path
+  // and was deferred. Consuming the latch on the first classified pause keeps genuine
+  // environmental pauses (S3/S3a) out of the sticky-lock path.
+  const GESTURE_LATCH_MS = 2500;
+  function pauseGesturePending() {
+    const g = window.__ytssPauseGesture;
+    if (!g || g.wasPaused || g.used) return false;
+    return (Date.now() - g.at) <= GESTURE_LATCH_MS;
+  }
+  function consumePauseGesture() {
+    const g = window.__ytssPauseGesture;
+    if (g && !g.wasPaused) g.used = true;
+  }
 
   HTMLMediaElement.prototype.play = function(...args) {
     if (!S.enabled) {
@@ -1327,9 +1342,8 @@
     try {
       if (typeof StudioEngine774 !== 'undefined' && !StudioEngine774.isAdActive()) {
         if (this === StudioEngine774.audio) {
-          const pg = window.__ytssPauseGesture;
-          const userIntent = pg && !pg.wasPaused && (Date.now() - pg.at) < 450;
-          if (IS_FIREFOX && !userIntent && Date.now() < (StudioEngine774._tabReturnGraceUntil || 0)) {
+          const userIntent = pauseGesturePending();
+          if (IS_FIREFOX && !userIntent && !StudioEngine774._userPaused && Date.now() < (StudioEngine774._tabReturnGraceUntil || 0)) {
             // Firefox tab return: a direct slave-audio pause() (page code / mediaSession
             // fallback) must not stop the audible stream synchronously; defer it like the
             // video-pause paths so a short player hiccup cannot mute the 774 stream.
@@ -1342,16 +1356,16 @@
           ((this.classList && this.classList.contains('html5-main-video')) ||
            (this.closest && this.closest('#movie_player, .html5-video-player')));
         if (isMainVideo) {
-          const g = window.__ytssPauseGesture;
           const seekBusy = typeof StudioEngine774.isSeekInProgress === 'function' && StudioEngine774.isSeekInProgress();
-          const userPauseIntent = g && !g.wasPaused && !fsBusy() && !seekBusy && (Date.now() - g.at) < 450;
+          const userPauseIntent = pauseGesturePending() && !fsBusy() && !seekBusy;
           if (userPauseIntent && typeof StudioEngine774.lockPause === 'function') {
+            consumePauseGesture();
             StudioEngine774.lockPause();
           }
           if (StudioEngine774.isActive) {
             const other = StudioEngine774.audio;
             if (other && !other.paused) {
-              if (IS_FIREFOX && !userPauseIntent && Date.now() < (StudioEngine774._tabReturnGraceUntil || 0)) {
+              if (IS_FIREFOX && !userPauseIntent && !StudioEngine774._userPaused && Date.now() < (StudioEngine774._tabReturnGraceUntil || 0)) {
                 // Firefox tab return: a transient player pause must not stop the audible stream
                 // synchronously (the 'pause' handler alone cannot cover this call path).
                 StudioEngine774.deferAudioPause();
@@ -1391,14 +1405,21 @@
   document.addEventListener('webkitfullscreenchange', onFsChange, true);
   const fsBusy = () => Date.now() < (window.__ytssFsBusyUntil || 0);
 
-  const isSeekUiTarget = (t) => !!(
-    t && typeof t.closest === 'function' &&
-    t.closest('.ytp-progress-bar, .html5-progress-bar, .ytp-progress-bar-container, .html5-progress-bar-container, .html5-progress-list, .html5-play-progress, .html5-load-progress, .html5-storyboard, .ytp-scrubber-container, .html5-scrubber-button, .ytp-chapter-container, .ytp-fine-scrubbing-container, .ytp-timed-markers-container, .ytp-ad-progress-list, [class*="progress-bar"], [class*="scrubber"], a[href*="t="], ytd-macro-markers-list-item-renderer')
-  );
-  const isVolUiTarget = (t) => !!(
-    t && typeof t.closest === 'function' &&
-    t.closest('.ytp-mute-button, .ytp-volume-panel, .html5-volume-panel, .ytp-volume-area, .ytp-volume-slider, .ytp-volume-slider-handle, .ytp-volume-icon, [class*="volume"]')
-  );
+  // Bug 7: the substring selectors also match the PLAYER ROOT
+  // (.html5-video-player.autominimize-progress-bar-non-aspect), so closest() treated every
+  // click inside the player as seek UI and the pause gesture was never armed. Ignore matches
+  // on the player containers themselves; only real seek/volume widgets count.
+  const uiWidgetHit = (t, sel) => {
+    if (!t || typeof t.closest !== 'function') return null;
+    const el = t.closest(sel);
+    if (!el) return null;
+    if (el.id === 'movie_player' || el.id === 'player-container' ||
+        el.classList.contains('html5-video-player') || el.classList.contains('html5-video-container') ||
+        el.classList.contains('html5-video-controls')) return null;
+    return el;
+  };
+  const isSeekUiTarget = (t) => !!uiWidgetHit(t, '.ytp-progress-bar, .html5-progress-bar, .ytp-progress-bar-container, .html5-progress-bar-container, .html5-progress-list, .html5-play-progress, .html5-load-progress, .html5-storyboard, .ytp-scrubber-container, .html5-scrubber-button, .ytp-chapter-container, .ytp-fine-scrubbing-container, .ytp-timed-markers-container, .ytp-ad-progress-list, [class*="progress-bar"], [class*="scrubber"], a[href*="t="], ytd-macro-markers-list-item-renderer');
+  const isVolUiTarget = (t) => !!uiWidgetHit(t, '.ytp-mute-button, .ytp-volume-panel, .html5-volume-panel, .ytp-volume-area, .ytp-volume-slider, .ytp-volume-slider-handle, .ytp-volume-icon, [class*="volume"]');
 
   document.addEventListener('pointerdown', (e) => {
     if (!e.isTrusted) return;
@@ -3809,11 +3830,11 @@
             }
             return;
           }
-          const g = window.__ytssPauseGesture;
-          const userPauseIntent = g && !g.wasPaused && !fsBusy() && (Date.now() - g.at) < 450;
+          const userPauseIntent = pauseGesturePending() && !fsBusy();
           // Only sticky-lock on user pause. Engine/MSE pause events otherwise
           // just stop 774 audio alongside the video.
           if (userPauseIntent) {
+            consumePauseGesture();
             this.lockPause();
           } else if (!this._userPaused && this.audio && !this.audio.paused) {
             if (IS_FIREFOX && Date.now() < (this._tabReturnGraceUntil || 0)) {
@@ -3860,6 +3881,9 @@
             // New media load = new playback context. Always drop pause lock so
             // click-to-play / autoplay after a pause is never swallowed.
             if (this._userPaused) this.unlockPlay();
+            if (window.__ytssPauseGesture && !window.__ytssPauseGesture.used) {
+              window.__ytssPauseGesture = { at: 0, wasPaused: true, used: true };
+            }
             // A source swap for a different video id is the earliest navigation signal.
             if (this.isActive && this.activeVideoId) {
               const navVid = this.navVidNow();
@@ -4066,15 +4090,15 @@
             // YT paused (UI button / space / media session through player)
             // Ignore state 2 noise during fullscreen transitions or timeline seek/scrub.
             if (!fsBusy()) {
-              const gState2 = window.__ytssPauseGesture;
-              const userPauseIntentState2 = gState2 && !gState2.wasPaused && (Date.now() - gState2.at) < 450;
-              if (IS_FIREFOX && !userPauseIntentState2 && Date.now() < (this._tabReturnGraceUntil || 0)) {
+              const userPauseIntentState2 = pauseGesturePending();
+              if (IS_FIREFOX && !userPauseIntentState2 && !this._userPaused && Date.now() < (this._tabReturnGraceUntil || 0)) {
                 // Firefox tab return: YouTube can report state 2 for a programmatic/transient
                 // element pause right after the tab returns. Do not turn that into a sticky
                 // user-pause lock (which blocks video.play() and keeps re-pausing the slave
                 // audio forever); defer the stop like the other tab-return paths.
                 this.deferAudioPause();
               } else if (!this.isSeekInProgress() || this._userPaused) {
+                consumePauseGesture();
                 this.lockPause();
               } else if (this.audio && !this.audio.paused) {
                 try { this.audio.pause(); } catch (e) {}
@@ -6329,7 +6353,14 @@
   // Resync on visibilitychange without resetting audio
   document.addEventListener('visibilitychange', () => {
     ChannelHealth.note('visibility', { state: document.visibilityState, hidden: document.hidden });
-    if (document.hidden) return;
+    if (document.hidden) {
+      // Bug 7: a latched pause gesture must not survive a tab hide — otherwise the next
+      // environmental pause inside the return grace would be mistaken for a user pause.
+      if (window.__ytssPauseGesture && !window.__ytssPauseGesture.used) {
+        window.__ytssPauseGesture = { at: 0, wasPaused: true, used: true };
+      }
+      return;
+    }
     if (!S.enabled || isMusicSite) return;
     const videoId = getVideoIdFromUrl();
     if (videoId) {
@@ -7750,7 +7781,9 @@
           // Symptom A: NEVER pull the native video back to the (possibly stale) audio position from
           // this per-second badge refresh. That write raced every user seek and yanked the video back
           // before the native seek settled, so UmpMseController774.onSeek(target) was never dispatched.
-          if (video.paused && !StudioEngine774.audio.paused) {
+          // Never resurrect a deliberate pause from this per-second badge refresh: the play is
+          // only there to re-glue the muted master video to the audible 774 stream.
+          if (video.paused && !StudioEngine774.audio.paused && !StudioEngine774._userPaused) {
             video.play().catch(() => {});
           }
         }
