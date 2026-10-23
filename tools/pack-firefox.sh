@@ -7,6 +7,10 @@
 # checked out or extracted (web-ext/zip embed the file mtime and are not reproducible).
 # Usage:
 #   ./tools/pack-firefox.sh [out-dir]
+#   YTSS_SOAK=1 ./tools/pack-firefox.sh [out-dir]   # test-only soak build, channel logger armed
+#
+# The soak build is byte-identical except for the DEBUG_CHANNEL_HEALTH_BUILD literal in
+# src/inject.js (flipped to true) and its filename suffix. Release builds never set it.
 
 set -euo pipefail
 
@@ -53,8 +57,16 @@ for f in "$ROOT_DIR"/locales/*.json; do
   cp "$f" "$STAGE_DIR/locales/"
 done
 
+if [ "${YTSS_SOAK:-0}" = "1" ]; then
+  sed -i 's/const DEBUG_CHANNEL_HEALTH_BUILD = false;/const DEBUG_CHANNEL_HEALTH_BUILD = true;/' "$STAGE_DIR/src/inject.js"
+  grep -q 'const DEBUG_CHANNEL_HEALTH_BUILD = true;' "$STAGE_DIR/src/inject.js" || {
+    echo "ERROR: soak flag patch failed" >&2; exit 1; }
+fi
+
 VERSION="$(node -p "require('$STAGE_DIR/manifest.json').version")"
-XPI_NAME="ytspoofingstream-vorapis-${VERSION}.xpi"
+SUFFIX=""
+[ "${YTSS_SOAK:-0}" = "1" ] && SUFFIX="-soak"
+XPI_NAME="ytspoofingstream-vorapis-${VERSION}${SUFFIX}.xpi"
 DEST_XPI="$OUT_DIR/$XPI_NAME"
 
 command -v python3 >/dev/null 2>&1 || {
