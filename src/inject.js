@@ -2016,6 +2016,16 @@
 
     flushQueue(session) {
       if (!session || session.aborted || !session.sourceBuffer) return;
+      // Ownership gate: a SABR session may only append while the engine still holds its video.
+      // Anything queued for a track the player has left is dropped instead of landing in the
+      // SourceBuffer after the transition.
+      const stillOwned = (StudioEngine774.isActive && StudioEngine774.activeVideoId === session.videoId) ||
+        (StudioEngine774.pending774 && StudioEngine774.pending774.videoId === session.videoId);
+      if (!stillOwned) {
+        session.appendQueue.length = 0;
+        this.stopSession(session);
+        return;
+      }
       if (session.sourceBuffer.updating || session.appendQueue.length === 0) return;
       if (session.mediaSource.readyState !== 'open' && session.mediaSource.readyState !== 'ended') return;
       const chunk = session.appendQueue.shift();
@@ -2709,6 +2719,19 @@
       } catch (e) {}
       return (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
     },
+    // Which video the player intends to play NOW. Either surface moving on from activeVideoId
+    // means the outgoing 774 source is stale: YouTube re-arms the media element for the next
+    // track before getVideoData() catches up (and the URL can update first on SPA autoplay).
+    // Returns activeVideoId when both surfaces still agree, so callers can compare directly.
+    navVidNow() {
+      const cur = this.activeVideoId;
+      let pv = null;
+      try { pv = document.getElementById('movie_player')?.getVideoData?.()?.video_id || null; } catch (e) {}
+      const uv = (typeof getVideoIdFromUrl === 'function') ? getVideoIdFromUrl() : null;
+      if (pv && VIDEO_ID_RE.test(pv) && pv !== cur) return pv;
+      if (uv && VIDEO_ID_RE.test(uv)) return uv;
+      return pv || uv || cur;
+    },
     // Engine-internal resume: never yank playback after a user/media-key pause.
     // Firefox tab-return guard: a transient video pause (player re-buffer / visibility settle)
     // must not stop the audible 774 stream. Defer the slave-audio pause by 600ms; the deferred
@@ -2730,6 +2753,10 @@
     _tryPlayAudio() {
       if (this._userPaused || Date.now() < this._pauseLockUntil) return;
       if (!this.isActive || !this.audio || this.isAdActive()) return;
+      // Ownership gate: every resume path funnels through here, so a 774 element attached to a
+      // track the player has already left can never be played again (Bug 6 replay).
+      const navVid = this.navVidNow();
+      if (this.activeVideoId && navVid && navVid !== this.activeVideoId) return;
       if (!this.audio.paused) return;
       this.audio.play().catch(() => {});
     },
@@ -3657,6 +3684,18 @@
         }
 
         if (e.type === 'play' || e.type === 'playing') {
+          // The player re-arms the <video> element for the NEXT track before getVideoData()
+          // catches up, so this event is never proof that the outgoing 774 source is current.
+          // Tear the old source down here, while the new one is still loading, instead of
+          // letting the resume block below seek the old element to the new video's 0:00.
+          if (this.isActive && this.activeVideoId) {
+            const navVidNow = this.navVidNow();
+            if (navVidNow && navVidNow !== this.activeVideoId) {
+              console.log(TAG, `[StudioEngine774] Track change on play (${this.activeVideoId} -> ${navVidNow}); tearing down the outgoing 774 source.`);
+              this.prepareTransition(navVidNow);
+              return;
+            }
+          }
           // Guard: if track has naturally ended, do NOT reset _trackEnded or resume audio unless loop mode is active
           if (video.ended && !this.isLoopActive()) {
             this._trackEnded = true;
@@ -3779,6 +3818,11 @@
             // New media load = new playback context. Always drop pause lock so
             // click-to-play / autoplay after a pause is never swallowed.
             if (this._userPaused) this.unlockPlay();
+            // A source swap for a different video id is the earliest navigation signal.
+            if (this.isActive && this.activeVideoId) {
+              const navVid = this.navVidNow();
+              if (navVid && navVid !== this.activeVideoId) this.prepareTransition(navVid);
+            }
           }, { passive: true });
           video.addEventListener('emptied', () => {
             if (!S.enabled) return;
@@ -4754,6 +4798,17 @@
       }
       if (typeof NextVideoManager !== 'undefined') {
         NextVideoManager.tick();
+      }
+      // Active teardown: as soon as the player intends a different video, stop and detach the
+      // outgoing 774 source. Do not wait for the new source to load — that gap is exactly when
+      // a stale resume path used to replay the tail of the previous track.
+      if (this.isActive && this.activeVideoId) {
+        const navVid = this.navVidNow();
+        if (navVid && navVid !== this.activeVideoId) {
+          console.log(TAG, `[StudioEngine774] Navigation started (${this.activeVideoId} -> ${navVid}); tearing down the outgoing 774 source.`);
+          this.prepareTransition(navVid);
+          return;
+        }
       }
       if (!this.isActive || !this.audio || !this.audio.src) return;
       if (this.isAdActive()) {
@@ -7659,7 +7714,14 @@
         }
       }
       if (player && typeof player.setPlaybackQuality === 'function') {
-        try { player.setPlaybackQuality('auto'); } catch (e) {}
+        // Badge refreshes run on every player state change, including the end-of-track frame.
+        // A quality call there makes the native player reload its media at 0:00, which used to
+        // re-arm the outgoing 774 element (Bug 6). Never touch the player mid-transition or
+        // once the track has ended; the next steady-state refresh restores the quality.
+        const eng = (typeof StudioEngine774 !== 'undefined') ? StudioEngine774 : null;
+        if (!(eng && eng.enabled !== false && (eng._isTransitioning || eng._trackEnded))) {
+          try { player.setPlaybackQuality('auto'); } catch (e) {}
+        }
       }
       if (player && typeof player.wakeUp === 'function') {
         try { player.wakeUp(); } catch (e) {}
