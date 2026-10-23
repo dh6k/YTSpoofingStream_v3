@@ -353,13 +353,16 @@
   // Enable: localStorage.setItem('ytss_debug_channel_health','1'); location.reload()
   // Read:   __ytssChannelHealth.dump()  (or localStorage.getItem('ytss_channel_health_log'))
   const IS_FIREFOX = typeof navigator !== 'undefined' && /Firefox\//.test(navigator.userAgent || '');
+  // Build-time test flag. tools/pack-firefox.sh --soak flips this literal in the staged copy
+  // only; every normal build keeps it false and the logger is off unless localStorage opts in.
+  const DEBUG_CHANNEL_HEALTH_BUILD = false;
   const ChannelHealth = (() => {
     let on = false;
-    try { on = IS_FIREFOX && localStorage.getItem('ytss_debug_channel_health') === '1'; } catch (e) {}
+    try { on = IS_FIREFOX && (DEBUG_CHANNEL_HEALTH_BUILD || localStorage.getItem('ytss_debug_channel_health') === '1'); } catch (e) {}
     if (!on) return { enabled: false, attach() {}, note() {}, noteInit() {} };
 
     const events = [];
-    const RING = 160, SAMPLE_MS = 250, DEAD_DB = -50, LIVE_DB = -30, SILENT_DB = -60;
+    const RING = 20000, SAMPLE_MS = 250, DEAD_DB = -50, LIVE_DB = -30, SILENT_DB = -60;
     let dead = false, ctx = null, tapEl = null, tapSrc = '', anL = null, anR = null, timer = null;
     let tapStream = null, tapGraph = [];
     let deadStart = 0, deadLogged = false, silStart = 0, silLogged = false;
@@ -1347,7 +1350,7 @@
             // Firefox tab return: a direct slave-audio pause() (page code / mediaSession
             // fallback) must not stop the audible stream synchronously; defer it like the
             // video-pause paths so a short player hiccup cannot mute the 774 stream.
-            StudioEngine774.deferAudioPause();
+            PlaybackArbiter.pauseAudio('hook-env-pause', { defer: true });
             return;
           }
           return origPause.apply(this, args);
@@ -1368,9 +1371,9 @@
               if (IS_FIREFOX && !userPauseIntent && !StudioEngine774._userPaused && Date.now() < (StudioEngine774._tabReturnGraceUntil || 0)) {
                 // Firefox tab return: a transient player pause must not stop the audible stream
                 // synchronously (the 'pause' handler alone cannot cover this call path).
-                StudioEngine774.deferAudioPause();
+                PlaybackArbiter.pauseAudio('hook-video-pause', { defer: true });
               } else {
-                try { origPause.call(other); } catch (e) {}
+                PlaybackArbiter.pauseAudio('hook-video-pause');
               }
             }
           }
@@ -1557,8 +1560,9 @@
     if (StudioEngine774.isActive) {
       StudioEngine774.isActive = false;
       if (StudioEngine774.audio) {
+        PlaybackArbiter.pauseAudio('hybrid-failover');
+        PlaybackArbiter.detach('hybrid-failover');
         try {
-          StudioEngine774.audio.pause();
           StudioEngine774.audio.removeAttribute('src');
           StudioEngine774.audio.load();
         } catch (e) {}
@@ -2093,7 +2097,7 @@
       if (session.mediaSource.readyState !== 'open' && session.mediaSource.readyState !== 'ended') return;
       const chunk = session.appendQueue.shift();
       try {
-        session.sourceBuffer.appendBuffer(chunk);
+        PlaybackArbiter.appendBuffer(session, chunk, 'ump-pump');
       } catch (err) {
         console.log(TAG, '[UmpMse774] appendBuffer error:', err);
       }
@@ -2442,11 +2446,7 @@
       const delta = cur - a.currentTime;
       if (!(delta > 0.12) || delta > 1.5) return false;
       if (a.seeking) return false;
-      try {
-        a.currentTime = Math.min(cur, strictV.end - 0.05);
-      } catch (e) {
-        return false;
-      }
+      if (!PlaybackArbiter.seekAudio(Math.min(cur, strictV.end - 0.05), 'ump-seek-align', { videoId: session.videoId })) return false;
       return true;
     },
 
@@ -2611,7 +2611,7 @@
                   session.initialSyncDone = true;
                   session.seekTargetSec = null;
                   if (cur > 0.8 || strictAudio === null) {
-                    try { a.currentTime = cur; } catch (e) {}
+                    PlaybackArbiter.seekAudio(cur, 'ump-initial-sync', { videoId: session.videoId });
                   }
                 } else {
                   const minRef = Math.min(cur, !isNaN(a.currentTime) ? a.currentTime : cur);
@@ -2621,7 +2621,7 @@
                     session.initialSyncDone = true;
                     session.seekTargetSec = null;
                     const snapTarget = (cur >= fwd.start && cur < fwd.end - 0.05) ? cur : (fwd.start + 0.02);
-                    try { a.currentTime = snapTarget; } catch (e) {}
+                    PlaybackArbiter.seekAudio(snapTarget, 'ump-initial-snap', { videoId: session.videoId });
                   }
                 }
               }
@@ -2678,6 +2678,282 @@
     }
   };
 
+  // ─── PLAYBACK ARBITER (K round) ───────────────────────────────────
+  // Single authority for every mutation of playback state on the 774 <audio> slave and the
+  // master <video>. The engine's event handlers are still the actuators, but they may only act
+  // through this object. Invariants enforced here, not at each call site:
+  //   1. no play() of either element while USER_PAUSED (a deliberate pause always wins);
+  //   2. no play/seek/append against a source that is no longer the player's current video;
+  //   3. no direct write to <video>.currentTime — video motion goes through player.seekTo();
+  //   4. playbackRate is written only by the drift controller (reason === 'drift');
+  //   5. every action carries a reason code and every state change is logged.
+  var PlaybackArbiter = {
+    STATE: { DETACHED: 'DETACHED', ATTACHING: 'ATTACHING', SYNCED: 'SYNCED', USER_PAUSED: 'USER_PAUSED', TRANSITION: 'TRANSITION', ENDED: 'ENDED' },
+    state: 'DETACHED',
+    reason: 'init',
+    since: Date.now(),
+    videoId: null,
+    transitions: [],
+    violations: [],
+    ops: { play: 0, playBlocked: 0, blocked: 0, pause: 0, seek: 0, videoPlay: 0, videoPause: 0, videoSeekReq: 0, rate: 0, src: 0, append: 0 },
+    _cap: 500,
+
+    _eng() { return (typeof StudioEngine774 !== 'undefined') ? StudioEngine774 : null; },
+    _publish() { try { window.__ytssArbiter = this; window.__ytssArbiterViolations = this.violations; } catch (e) {} },
+
+    _note(kind, reason, extra) {
+      const rec = { t: Date.now(), kind: kind, reason: String(reason || ''), state: this.state, videoId: this.videoId };
+      if (extra) { for (const k in extra) rec[k] = extra[k]; }
+      this.transitions.push(rec);
+      if (this.transitions.length > this._cap) this.transitions.shift();
+      if (kind === 'op') {
+        try {
+          if (typeof ChannelHealth !== 'undefined' && ChannelHealth.enabled) {
+            ChannelHealth.note('arb-op', { op: String(reason || '').slice(0, 60), state: this.state, to: extra && extra.to != null ? extra.to : null, rate: extra && extra.rate != null ? extra.rate : null });
+          }
+        } catch (e) {}
+      }
+    },
+
+    _violation(kind, reason, detail) {
+      const e = this._eng();
+      const rec = {
+        t: Date.now(), kind: kind, reason: String(reason || ''), state: this.state,
+        videoId: this.videoId, activeVideoId: e ? e.activeVideoId : null,
+        navVid: this._navVid(), detail: detail === undefined ? null : detail
+      };
+      this.violations.push(rec);
+      if (this.violations.length > this._cap) this.violations.shift();
+      try { console.warn(TAG, '[PlaybackArbiter][INVARIANT]', kind, rec); } catch (e2) {}
+      this._publish();
+      return false;
+    },
+
+    _navVid() {
+      const e = this._eng();
+      try { return e && typeof e.navVidNow === 'function' ? e.navVidNow() : null; } catch (x) { return null; }
+    },
+
+    // (2) Source ownership: every actor must name/own the current video.
+    ownerOk(vid, op) {
+      if (!vid && !this.videoId) return true;
+      const target = vid || this.videoId;
+      const e = this._eng();
+      if (e && e.activeVideoId && target && e.activeVideoId !== target && op !== 'detach') {
+        this.ops.blocked++;
+        this._note('blocked', 'owner-mismatch:' + op, { target: target, active: e.activeVideoId });
+        return false;
+      }
+      if (op !== 'detach' && op !== 'video-pause' && op !== 'pause') {
+        const nav = this._navVid();
+        if (e && (e.isActive || e._isTransitioning) && nav && target && nav !== target) {
+          this.ops.blocked++;
+          this._note('blocked', 'stale-source:' + op, { target: target, nav: nav });
+          return false;
+        }
+      }
+      return true;
+    },
+
+    setState(next, reason, vid) {
+      if (!this.STATE[next]) return;
+      if (vid !== undefined && vid !== null) this.videoId = vid;
+      const prev = this.state;
+      this.state = next;
+      this.reason = String(reason || prev);
+      this.since = Date.now();
+      this._note('state', this.reason, { from: prev, to: next });
+      this._publish();
+    },
+
+    attachStart(videoId, reason) { this.setState('ATTACHING', reason || 'attach', videoId); },
+    attachReady(videoId, reason) {
+      const e = this._eng();
+      if (e && (e._userPaused || this.state === 'USER_PAUSED')) return;
+      if (videoId && this._navVid() && this._navVid() !== videoId) return;
+      if (this.state === 'TRANSITION' || this.state === 'DETACHED') return;
+      this.setState('SYNCED', reason || 'attach-ready', videoId);
+    },
+    transitionStart(videoId, reason) { this.setState('TRANSITION', reason || 'track-transition', videoId); },
+    userPause(reason) { this.setState('USER_PAUSED', reason || 'user-pause'); },
+    userResume(reason) {
+      const e = this._eng();
+      this.setState((e && e.isActive) ? 'SYNCED' : 'DETACHED', reason || 'user-resume');
+    },
+    ended(reason) { if (this.state !== 'USER_PAUSED') this.setState('ENDED', reason || 'track-end'); },
+    detach(reason) { this.setState('DETACHED', reason || 'detach'); },
+
+    // (1) play is refused while USER_PAUSED, from any actor.
+    _blockedByUser(op, reason) {
+      const e = this._eng();
+      if ((e && e._userPaused) || this.state === 'USER_PAUSED') {
+        this.ops.playBlocked++;
+        this._note('blocked', 'play-while-user-paused:' + op, { reason: reason });
+        return true;
+      }
+      return false;
+    },
+
+    playAudio(reason) {
+      const e = this._eng();
+      if (!e || !e.audio || !e.isActive || e.isAdActive()) return false;
+      if (this._blockedByUser('audio-play', reason)) return false;
+      if (!this.ownerOk(e.activeVideoId, 'play')) return false;
+      if (!e.audio.paused) return true;
+      this.ops.play++;
+      this._note('op', 'play-audio:' + reason);
+      let p;
+      try { p = origPlay.call(e.audio); } catch (x) { return false; }
+      if (p && typeof p.then === 'function') {
+        p.then(() => {
+          if (this.state === 'ATTACHING' && (!e.activeVideoId || this.videoId === e.activeVideoId)) {
+            this.attachReady(e.activeVideoId, 'audio-play-ok');
+          }
+        }, (err) => {
+          if (err && err.name === 'NotAllowedError') this._armGestureResume('audio');
+        });
+      }
+      return true;
+    },
+
+    playVideo(reason) {
+      const v = (typeof getMainVideoElement === 'function') ? getMainVideoElement() : null;
+      if (!v || !v.paused) return false;
+      if (this._blockedByUser('video-play', reason)) return false;
+      const e = this._eng();
+      if (e && e.isActive && !e.isAdActive() && typeof e._silenceElement === 'function') {
+        e._silenceElement(v);
+      }
+      this.ops.videoPlay++;
+      this._note('op', 'play-video:' + reason);
+      let p;
+      try { p = origPlay.call(v); } catch (x) { return false; }
+      if (p && typeof p.catch === 'function') {
+        p.catch((err) => { if (err && err.name === 'NotAllowedError') this._armGestureResume('video'); });
+      }
+      return true;
+    },
+
+    _armGestureResume(kind) {
+      const self = this;
+      const resume = () => {
+        const e = self._eng();
+        if (!e || !e.isActive || e._userPaused) return;
+        const v = (typeof getMainVideoElement === 'function') ? getMainVideoElement() : null;
+        if (v && v.paused) return;
+        if (kind === 'audio') self.playAudio('gesture-resume');
+        else self.playVideo('gesture-resume');
+      };
+      try {
+        window.addEventListener('click', resume, { once: true, capture: true });
+        window.addEventListener('keydown', resume, { once: true, capture: true });
+      } catch (e) {}
+    },
+
+    // Pause is always legal. Transient environmental pauses may still be deferred on Firefox
+    // tab return; that rule lives here instead of in five separate handlers.
+    pauseAudio(reason, opts) {
+      const e = this._eng();
+      if (!e || !e.audio) return false;
+      const o = opts || {};
+      if (o.defer && IS_FIREFOX && !e._userPaused && Date.now() < (e._tabReturnGraceUntil || 0) && this.state !== 'USER_PAUSED') {
+        e.deferAudioPause();
+        return false;
+      }
+      if (e.audio.paused) return true;
+      this.ops.pause++;
+      this._note('op', 'pause-audio:' + reason);
+      try { origPause.call(e.audio); } catch (x) { return false; }
+      return true;
+    },
+
+    pauseVideo(reason) {
+      const v = (typeof getMainVideoElement === 'function') ? getMainVideoElement() : null;
+      if (!v || v.paused) return false;
+      this.ops.videoPause++;
+      this._note('op', 'pause-video:' + reason);
+      try { origPause.call(v); } catch (x) { return false; }
+      return true;
+    },
+
+    // (3) Direct <video>.currentTime writes are forbidden. Use the player's seek API.
+    seekPlayer(sec, reason) {
+      const n = Number(sec);
+      if (!isFinite(n) || n < 0) return false;
+      const p = document.getElementById('movie_player');
+      if (!p || typeof p.seekTo !== 'function') {
+        return this._violation('video-seek-unavailable', reason, { to: n });
+      }
+      this.ops.videoSeekReq++;
+      this._note('op', 'seek-player:' + reason, { to: Math.round(n * 1000) / 1000 });
+      try { p.seekTo(n, true); return true; } catch (x) { return false; }
+    },
+
+    // (2) seekAudio names the source it acts on and refuses a stale one.
+    seekAudio(sec, reason, opts) {
+      const e = this._eng();
+      if (!e || !e.audio) return false;
+      const o = opts || {};
+      if (!o.forceOwner && !this.ownerOk(o.videoId || e.activeVideoId, 'seek')) return false;
+      const n = Number(sec);
+      if (!isFinite(n) || n < 0) return false;
+      if (Math.abs((e.audio.currentTime || 0) - n) < 0.001) return true;
+      this.ops.seek++;
+      this._note('op', 'seek-audio:' + reason, { to: Math.round(n * 1000) / 1000 });
+      try { e.audio.currentTime = n; return true; } catch (x) { return false; }
+    },
+
+    // (4) playbackRate is written only by the drift controller.
+    setRate(rate, reason) {
+      if (reason !== 'drift') return this._violation('rate-write-non-drift', reason, { rate: rate });
+      const e = this._eng();
+      if (!e || !e.audio) return false;
+      const n = Number(rate);
+      if (!isFinite(n) || n <= 0) return false;
+      if (Math.abs((e.audio.playbackRate || 1.0) - n) < 0.0005) return true;
+      this.ops.rate++;
+      this._note('op', 'rate:' + reason, { rate: Math.round(n * 10000) / 10000 });
+      try { e.audio.playbackRate = n; return true; } catch (x) { return false; }
+    },
+
+    setSource(url, reason, videoId) {
+      const e = this._eng();
+      if (!e || !e.audio) return false;
+      if (!this.ownerOk(videoId || e.activeVideoId, 'src')) return false;
+      this.ops.src++;
+      this._note('op', 'src:' + reason, { url: String(url || '').slice(0, 40) });
+      try {
+        e.audio.pause();
+        e.audio.removeAttribute('src');
+        e.audio.load();
+        e.audio.src = url;
+        e.audio.load();
+        return true;
+      } catch (x) { return false; }
+    },
+
+    appendBuffer(session, chunk, reason) {
+      if (!session || session.aborted || !session.sourceBuffer) return false;
+      if (!this.ownerOk(session.videoId, 'append')) return false;
+      this.ops.append++;
+      this._note('op', 'append:' + reason, { bytes: chunk && chunk.byteLength ? chunk.byteLength : null, seq: session.lastAppendedSeq });
+      try { session.sourceBuffer.appendBuffer(chunk); return true; } catch (x) { return false; }
+    },
+
+    canGlueVideo() {
+      const e = this._eng();
+      return !(e && e._userPaused) && (this.state === 'SYNCED' || this.state === 'ATTACHING');
+    },
+
+    snapshot() {
+      return {
+        state: this.state, reason: this.reason, since: this.since, videoId: this.videoId,
+        ops: this.ops, transitions: this.transitions.slice(-80), violations: this.violations.slice(-80)
+      };
+    }
+  };
+  PlaybackArbiter._publish();
+
   // ─── STUDIO ENGINE 774 ─────────────────────────────────────────────
   // High-Fidelity Audio Engine: Direct Hardware Opus Playback • Sync Engine • Unified Player Binding
   const initialVolState = readStoredYoutubeVolumeState();
@@ -2732,6 +3008,7 @@
       this._locking = true;
       try {
         this._userPaused = true;
+        PlaybackArbiter.userPause('lockPause');
         this._pauseLockedAt = Date.now();
         this._pauseLockSource = window.__ytssPauseGesture?.source || null;
         this._pauseLockUntil = Date.now() + 60000;
@@ -2740,13 +3017,10 @@
           || this.activeVideoId;
         const apply = () => {
           if (!this._userPaused) return;
-          try {
-            if (this.audio && !this.audio.paused) this.audio.pause();
-            const v = getMainVideoElement();
-            if (v && !v.paused && !v.ended) v.pause();
-            // Do NOT call player.pauseVideo() here. That fights play() and makes
-            // the control-bar icon flicker; only the media elements are stamped.
-          } catch (e) {}
+          // Do NOT call player.pauseVideo() here. That fights play() and makes
+          // the control-bar icon flicker; only the media elements are stamped.
+          PlaybackArbiter.pauseAudio('pause-reassert');
+          PlaybackArbiter.pauseVideo('pause-reassert');
         };
         apply();
         if (this._pauseReassert) clearInterval(this._pauseReassert);
@@ -2756,6 +3030,7 @@
       }
     },
     unlockPlay() {
+      const wasPaused = this._userPaused;
       this._userPaused = false;
       this._pauseLockedAt = 0;
       this._pauseLockSource = null;
@@ -2765,6 +3040,8 @@
         clearInterval(this._pauseReassert);
         this._pauseReassert = null;
       }
+      if (wasPaused) PlaybackArbiter.userResume('unlockPlay');
+      else if (!this.isActive && PlaybackArbiter.state !== 'TRANSITION') PlaybackArbiter.detach('unlockPlay-idle');
     },
     // True when a pause lock does not belong to `vid` (or lock has no identity).
     pauseLockIsStale(vid) {
@@ -2809,7 +3086,7 @@
         const vNow = getMainVideoElement();
         if (vNow && !vNow.paused && !vNow.ended) return;
         if (document.getElementById('movie_player')?.getPlayerState?.() === 1) return;
-        try { this.audio.pause(); } catch (e) {}
+        PlaybackArbiter.pauseAudio('defer-env-pause');
       }, 600);
     },
 
@@ -2821,7 +3098,7 @@
       const navVid = this.navVidNow();
       if (this.activeVideoId && navVid && navVid !== this.activeVideoId) return;
       if (!this.audio.paused) return;
-      this.audio.play().catch(() => {});
+      PlaybackArbiter.playAudio('tryPlayAudio');
     },
     _isAudioBuffering: false,
     _isInternalVideoSync: false,
@@ -2981,12 +3258,10 @@
             this._initialMetaSynced = true;
             const vTime = getVideoTimeFor(this.activeVideoId);
             if (vTime > 0.5 && Math.abs(this.audio.currentTime - vTime) > 0.35) {
-              try {
-                this.audio.currentTime = vTime;
-                if (UmpMseController774.isActive) {
-                  UmpMseController774.onSeek(vTime, { userSeek: false });
-                }
-              } catch (e) {}
+              PlaybackArbiter.seekAudio(vTime, 'loadedmetadata-align');
+              if (UmpMseController774.isActive) {
+                UmpMseController774.onSeek(vTime, { userSeek: false });
+              }
             }
             this.applyAudioRate(video);
           }
@@ -3013,11 +3288,12 @@
         // When 774 audio is ACTUALLY playing, seamlessly silence native video and align silent video to Master Clock audio
         this.audio.addEventListener('playing', () => {
           this._reconnectAttempts = 0;
+          PlaybackArbiter.attachReady(this.activeVideoId, 'audio-playing');
           this._lastAudioTime = this.audio.currentTime;
           this._lastAudioAdvance = Date.now();
           onAudioBufferReady();
           if (this.isAdActive()) {
-            try { this.audio.pause(); } catch (e) {}
+            PlaybackArbiter.pauseAudio('ad-active');
             const v = getMainVideoElement();
             if (v) this.restoreNativeVideo(v);
             return;
@@ -3028,7 +3304,7 @@
               const pState = document.getElementById('movie_player')?.getPlayerState?.();
               // If user paused video while audio was still buffering/loading, immediately pause audio to prevent sound leak
               if (video.paused && pState !== 3 && (!document.hidden || this._userPaused || pState === 2 || pState === 0)) {
-                try { this.audio.pause(); } catch (e) {}
+                PlaybackArbiter.pauseAudio('playing-video-paused');
                 return;
               }
               this._silenceElement(video);
@@ -3041,11 +3317,10 @@
               if ((!playerVid || playerVid === this.activeVideoId) && !document.hidden && !video.paused && !video.seeking && !this._isSeeking && !this._isInternalVideoSync && canResyncAudioOnPlay) {
                 const audioBehindSec = video.currentTime - this.audio.currentTime;
                 if (audioBehindSec > 0.40 && audioBehindSec <= 1.5 && this.isTimeBuffered(this.audio, video.currentTime)) {
-                  try {
-                    this.audio.currentTime = video.currentTime;
+                  if (PlaybackArbiter.seekAudio(video.currentTime, 'audio-playing-resync')) {
                     this._lastAudioTime = video.currentTime;
                     this._lastAudioAdvance = Date.now();
-                  } catch (e) {}
+                  }
                 }
               }
             }
@@ -3081,25 +3356,22 @@
             console.log(TAG, '[StudioEngine774] Loop mode is ACTIVE -> Seamlessly looping current 774 track from 0:00');
             this._trackEnded = false;
             if (this.audio) {
-              this.audio.currentTime = 0;
-              this.audio.play().catch(() => {});
+              PlaybackArbiter.seekAudio(0, 'loop-replay');
+              PlaybackArbiter.playAudio('loop-replay');
             }
             const video = getMainVideoElement();
             if (video) {
               this._silenceElement(video);
-              try { video.currentTime = 0; } catch (e) {}
-              if (video.paused) {
-                video.play().catch(() => {});
-              }
+              PlaybackArbiter.seekPlayer(0, 'loop-replay');
+              PlaybackArbiter.playVideo('loop-replay');
             }
             return;
           }
 
           console.log(TAG, '[StudioEngine774] Audio playback completed. Evaluating autoplay/playlist state...');
           this._trackEnded = true;
-          if (this.audio && !this.audio.paused) {
-            try { this.audio.pause(); } catch (e) {}
-          }
+          PlaybackArbiter.ended('audio-ended');
+          PlaybackArbiter.pauseAudio('audio-ended');
           const video = getMainVideoElement();
           const player = document.getElementById('movie_player');
           const shouldAdvance = this.shouldAutoplayNext();
@@ -3107,13 +3379,11 @@
           if (video) {
             this._silenceElement(video);
             this._isInternalVideoSync = true;
-            try {
-              if (video.duration && !isNaN(video.duration)) {
-                video.currentTime = video.duration;
-              }
-            } catch (e) {}
+            if (video.duration && !isNaN(video.duration)) {
+              PlaybackArbiter.seekPlayer(video.duration, 'audio-ended');
+            }
             // ALWAYS pause video at track end so it stays cleanly stopped on the end screen
-            try { video.pause(); } catch (e) {}
+            PlaybackArbiter.pauseVideo('audio-ended');
             if (shouldAdvance) {
               // Dispatch ended once to trigger YouTube's native transition ONLY if video not already ended
               if (!video.ended) {
@@ -3530,9 +3800,7 @@
         // If an ad is active, immediately pause 774 audio and restore native video audio
         // (must run before activePlayerVid check and before document.hidden check)
         if (this.isAdActive()) {
-          if (this.audio && !this.audio.paused) {
-            try { this.audio.pause(); } catch (err) {}
-          }
+          PlaybackArbiter.pauseAudio('ad-active');
           this.restoreNativeVideo(video);
           return;
         }
@@ -3613,7 +3881,7 @@
           if (this.isLoopActive() && vTargetSec < 1.0 && this.audio && this.audio.duration && this.audio.currentTime >= this.audio.duration - 2.5) {
             console.log(TAG, '[StudioEngine774] Native video looped back to start -> Resetting 774 audio to 0:00');
             this._trackEnded = false;
-            this.audio.currentTime = vTargetSec;
+            PlaybackArbiter.seekAudio(vTargetSec, 'native-loop-seeked');
             if (this.audio.paused && !this._userPaused) {
               this._tryPlayAudio();
             }
@@ -3638,7 +3906,7 @@
             // Responsive seek: immediately align audio whenever drift > 0.12s (covers short seeks, scrubbing, chapter clicks)
             if (drift > 0.12 || mseNeedsSeek) {
               this._lastSeekTime = Date.now();
-              this.audio.currentTime = vTargetSec;
+              PlaybackArbiter.seekAudio(vTargetSec, 'seeked-align');
               if (UmpMseController774.isActive) {
                 UmpMseController774.onSeek(vTargetSec, { userSeek: true });
               }
@@ -3670,22 +3938,17 @@
           if (this.isLoopActive()) {
             this._trackEnded = false;
             if (this.audio) {
-              this.audio.currentTime = 0;
-              this.audio.play().catch(() => {});
+              PlaybackArbiter.seekAudio(0, 'loop-replay');
+              PlaybackArbiter.playAudio('loop-replay');
             }
-            try { video.currentTime = 0; } catch (e) {}
-            if (video.paused) {
-              video.play().catch(() => {});
-            }
+            PlaybackArbiter.seekPlayer(0, 'loop-replay');
+            PlaybackArbiter.playVideo('loop-replay');
             return;
           }
           this._trackEnded = true;
-          if (video && !video.paused) {
-            try { video.pause(); } catch (e) {}
-          }
-          if (this.audio && !this.audio.paused) {
-            try { this.audio.pause(); } catch (e) {}
-          }
+          PlaybackArbiter.ended('video-ended');
+          PlaybackArbiter.pauseVideo('video-ended');
+          PlaybackArbiter.pauseAudio('video-ended');
           return;
         }
 
@@ -3698,7 +3961,7 @@
             if (this.audio.paused) {
               const vTargetSec = getVideoTimeFor(this.activeVideoId);
               if (Math.abs(this.audio.currentTime - vTargetSec) > 1.0) {
-                this.audio.currentTime = vTargetSec;
+                PlaybackArbiter.seekAudio(vTargetSec, 'hidden-resume-align');
               }
               this._tryPlayAudio();
             }
@@ -3716,15 +3979,12 @@
             }
             // Otherwise (pState === 2 for paused, or 0 for ended, or -1 for unstarted), genuine pause!
             this._userPaused = true;
-            if (this.audio && !this.audio.paused) {
-              try { this.audio.pause(); } catch (err) {}
-            }
+            PlaybackArbiter.userPause('hidden-pause');
+            PlaybackArbiter.pauseAudio('hidden-pause');
             return;
           }
           if (e.type === 'error') {
-            if (this.audio && !this.audio.paused) {
-              try { this.audio.pause(); } catch (err) {}
-            }
+            PlaybackArbiter.pauseAudio('hidden-media-error');
             UmpMseController774.stop();
             return;
           }
@@ -3762,7 +4022,8 @@
           // Guard: if track has naturally ended, do NOT reset _trackEnded or resume audio unless loop mode is active
           if (video.ended && !this.isLoopActive()) {
             this._trackEnded = true;
-            if (this.audio && !this.audio.paused) try { this.audio.pause(); } catch (e) {}
+            PlaybackArbiter.ended('video-ended-at-play');
+            PlaybackArbiter.pauseAudio('video-ended-at-play');
             return;
           }
           if (this._userPaused) {
@@ -3785,7 +4046,7 @@
           }
 
           if (this.isAdActive()) {
-            this.audio.pause();
+            PlaybackArbiter.pauseAudio('ad-active-play');
             this.restoreNativeVideo(video);
             return;
           }
@@ -3798,21 +4059,11 @@
             const diff = Math.abs(this.audio.currentTime - vTargetSec);
             // Only align audio.currentTime when resuming from paused if drift is > 0.6s
             if (diff > 0.6) {
-              this.audio.currentTime = vTargetSec;
+              PlaybackArbiter.seekAudio(vTargetSec, 'video-play-resume-align');
             }
             this.applyAudioRate(video);
             if (!this._userPaused) {
-              this.audio.play().catch((err) => {
-                if (err && err.name === 'NotAllowedError') {
-                  const resume = () => {
-                    if (this.isActive && this.audio && !video.paused && !this.isAdActive() && !this._userPaused) {
-                      this.audio.play().catch(() => {});
-                    }
-                  };
-                  window.addEventListener('click', resume, { once: true, capture: true });
-                  window.addEventListener('keydown', resume, { once: true, capture: true });
-                }
-              });
+              PlaybackArbiter.playAudio('video-play-event');
             }
           }
         } else if (e.type === 'pause') {
@@ -3825,9 +4076,7 @@
             return;
           }
           if (this._isInternalVideoSync || this._isSeeking || this.isSeekInProgress()) {
-            if (!this._userPaused && this.audio && !this.audio.paused) {
-              try { this.audio.pause(); } catch (e) {}
-            }
+            if (!this._userPaused) PlaybackArbiter.pauseAudio('video-pause-during-seek');
             return;
           }
           const userPauseIntent = pauseGesturePending() && !fsBusy();
@@ -3836,19 +4085,13 @@
           if (userPauseIntent) {
             consumePauseGesture();
             this.lockPause();
-          } else if (!this._userPaused && this.audio && !this.audio.paused) {
-            if (IS_FIREFOX && Date.now() < (this._tabReturnGraceUntil || 0)) {
-              // Firefox tab return: give the video 600ms to resume before stopping the audio.
-              this.deferAudioPause();
-            } else {
-              try { this.audio.pause(); } catch (e) {}
-            }
+          } else if (!this._userPaused) {
+            // Firefox tab return: give the video 600ms to resume before stopping the audio.
+            PlaybackArbiter.pauseAudio('video-pause-event', { defer: true });
           }
         } else if (e.type === 'error') {
           console.log(TAG, '[StudioEngine774] Main video element error -> Halting audio stream');
-          if (this.audio && !this.audio.paused) {
-            try { this.audio.pause(); } catch (err) {}
-          }
+          PlaybackArbiter.pauseAudio('video-error');
           UmpMseController774.stop();
           this.isActive = false;
           return;
@@ -3857,7 +4100,7 @@
             this._silenceElement(video);
             this.syncVol(video);
             if (video.paused && !this.audio.paused) {
-              this.audio.pause();
+              PlaybackArbiter.pauseAudio('video-loadedmetadata-paused');
             } else if (!video.paused && this.audio.paused) {
               this._tryPlayAudio();
             }
@@ -3967,8 +4210,8 @@
             if (S.enabled) {
               if (!this.isSeekInProgress() || this._userPaused) {
                 this.lockPause();
-              } else if (this.audio && !this.audio.paused) {
-                try { this.audio.pause(); } catch (e) {}
+              } else {
+                PlaybackArbiter.pauseAudio('player-pauseVideo-hook');
               }
             }
             return origPauseVideo(...a);
@@ -3988,21 +4231,13 @@
             navigator.mediaSession.setActionHandler('pause', () => {
               if (S.enabled) this.lockPause();
               try { player.pauseVideo?.(); } catch (e) {}
-              if (this.audio && !this.audio.paused) {
-                try { this.audio.pause(); } catch (e) {}
-              }
-              const v = getMainVideoElement();
-              if (v && !v.paused) {
-                try { origPause.call(v); } catch (e) {}
-              }
+              PlaybackArbiter.pauseAudio('media-key-pause');
+              PlaybackArbiter.pauseVideo('media-key-pause');
             });
             navigator.mediaSession.setActionHandler('play', () => {
               this.unlockPlay();
               try { player.playVideo?.(); } catch (e) {}
-              const v = getMainVideoElement();
-              if (v && v.paused) {
-                try { v.play(); } catch (e) {}
-              }
+              PlaybackArbiter.playVideo('media-key-play');
             });
           }
         } catch (e) {}
@@ -4100,8 +4335,8 @@
               } else if (!this.isSeekInProgress() || this._userPaused) {
                 consumePauseGesture();
                 this.lockPause();
-              } else if (this.audio && !this.audio.paused) {
-                try { this.audio.pause(); } catch (e) {}
+              } else {
+                PlaybackArbiter.pauseAudio('player-state-2');
               }
             }
             return;
@@ -4111,25 +4346,18 @@
             if (this.isLoopActive()) {
               this._trackEnded = false;
               if (this.audio) {
-                this.audio.currentTime = 0;
-                this.audio.play().catch(() => {});
+                PlaybackArbiter.seekAudio(0, 'loop-replay');
+                PlaybackArbiter.playAudio('loop-replay');
               }
-              const v = getMainVideoElement();
-              if (v) {
-                try { v.currentTime = 0; } catch (e) {}
-                if (v.paused) v.play().catch(() => {});
-              }
+              PlaybackArbiter.seekPlayer(0, 'loop-replay');
+              PlaybackArbiter.playVideo('loop-replay');
               return;
             }
             isPlaybackEnded = true;
             this._trackEnded = true;
-            const v = getMainVideoElement();
-            if (v && !v.paused) {
-              try { v.pause(); } catch (e) {}
-            }
-            if (this.audio && !this.audio.paused) {
-              try { this.audio.pause(); } catch (e) {}
-            }
+            PlaybackArbiter.ended('player-state-0');
+            PlaybackArbiter.pauseVideo('player-state-0');
+            PlaybackArbiter.pauseAudio('player-state-0');
           } else if (state === 1 || state === 3) {
             this._trackEnded = false;
             if (isPlaybackEnded) {
@@ -4158,8 +4386,8 @@
               this.stopAndUnmute('Navigated away from watch page');
               return;
             }
-            if (state === 5 && this.audio && !this.audio.paused) {
-              try { this.audio.pause(); } catch (e) {}
+            if (state === 5) {
+              PlaybackArbiter.pauseAudio('player-state-5');
             }
             handleVideoDataChange();
           }
@@ -4178,9 +4406,7 @@
         player.addEventListener('onError', (errCode) => {
           if (!S.enabled) return;
           console.log(TAG, `[StudioEngine774] Player onError: ${errCode} -> pausing 774 audio`);
-          if (this.audio && !this.audio.paused) {
-            try { this.audio.pause(); } catch (err) {}
-          }
+          PlaybackArbiter.pauseAudio('player-onError');
           UmpMseController774.stop();
         });
 
@@ -4320,6 +4546,7 @@
       this._isTransitioning = true;
       this._transitionTargetVid = newVid;
       this._transitionStartedAt = Date.now();
+      PlaybackArbiter.transitionStart(newVid, 'prepareTransition');
       this._initialMetaSynced = false;
       this.isActive = false;
       this.activeVideoId = null;
@@ -4358,8 +4585,8 @@
         }
       }, 6000);
       if (this.audio) {
+        PlaybackArbiter.pauseAudio('prepareTransition');
         try {
-          this.audio.pause();
           this.audio.removeAttribute('src');
           this.audio.load();
         } catch (e) {}
@@ -4599,7 +4826,7 @@
           if (drift > 0.8) {
             this._isInternalVideoSync = true;
             this._isTabResyncing = true;
-            video.currentTime = this.audio.currentTime;
+            PlaybackArbiter.seekPlayer(this.audio.currentTime, 'tab-resync');
             const onSeeked = () => {
               video.removeEventListener('seeked', onSeeked);
               setTimeout(() => {
@@ -4613,14 +4840,14 @@
               this._isTabResyncing = false;
             }, 1200);
           }
-          video.play().catch(() => {});
+          PlaybackArbiter.playVideo('tab-return');
           this._silenceElement(video);
         } else {
           const drift = this.audio.currentTime - video.currentTime;
           if (drift > 1.2) {
             this._isInternalVideoSync = true;
             this._isTabResyncing = true;
-            video.currentTime = this.audio.currentTime;
+            PlaybackArbiter.seekPlayer(this.audio.currentTime, 'tab-resync');
             const onSeeked = () => {
               video.removeEventListener('seeked', onSeeked);
               setTimeout(() => {
@@ -4639,7 +4866,7 @@
       } else if (this.audio.ended || (this.audio.duration && this.audio.currentTime >= this.audio.duration - 0.5)) {
         // Audio already completed while tab was hidden: advance video immediately to end
         this._isInternalVideoSync = true;
-        if (video.duration) video.currentTime = video.duration;
+        if (video.duration) PlaybackArbiter.seekPlayer(video.duration, 'tab-hidden-ended');
         const shouldAdvance = this.shouldAutoplayNext();
         if (shouldAdvance) {
           video.dispatchEvent(new Event('ended', { bubbles: true }));
@@ -4648,7 +4875,7 @@
             try { player.nextVideo(); } catch (e) {}
           }
         } else {
-          try { video.pause(); } catch (e) {}
+          PlaybackArbiter.pauseVideo('tab-hidden-ended');
           const player = document.getElementById('movie_player');
           if (player && typeof player.pauseVideo === 'function') {
             try { player.pauseVideo(); } catch (e) {}
@@ -4657,7 +4884,7 @@
         }
         setTimeout(() => { this._isInternalVideoSync = false; }, 250);
       } else if (video.paused && !this.audio.paused) {
-        this.audio.pause();
+        PlaybackArbiter.pauseAudio('tab-visible-video-paused');
       } else if (IS_FIREFOX && !video.paused && this.audio.paused && !this.audio.ended &&
                  !this._userPaused && !this.isAdActive()) {
         // Firefox: this branch used to be unreachable (audio.paused is always true in this
@@ -4697,17 +4924,11 @@
 
       console.log(TAG, `[StudioEngine774] Auto-reconnecting stream (#${this._reconnectAttempts}, reason: ${reason}) at ${targetTime.toFixed(2)}s...`);
       ChannelHealth.note('reconnect', { reason: String(reason || '').slice(0, 40), at: Math.round(targetTime * 100) / 100 });
-      try {
-        this.audio.pause();
-        this.audio.removeAttribute('src');
-        this.audio.load();
-      } catch (e) {}
-
-      this.audio.src = streamUrl;
-      this.audio.load();
+      PlaybackArbiter.pauseAudio('reconnect');
+      PlaybackArbiter.setSource(streamUrl, 'reconnect');
       ChannelHealth.attach(this.audio);
       if (targetTime > 0.05) {
-        try { this.audio.currentTime = targetTime; } catch (e) {}
+        PlaybackArbiter.seekAudio(targetTime, 'reconnect', { videoId: this.activeVideoId });
       }
       if (video) {
         this.applyAudioRate(video);
@@ -4755,9 +4976,7 @@
       else if (target < this._corrApplied - step) this._corrApplied -= step;
       else this._corrApplied = target;
       const wanted = base * this._corrApplied;
-      if (Math.abs((this.audio.playbackRate || 1.0) - wanted) > 0.0005) {
-        try { this.audio.playbackRate = wanted; } catch (e) {}
-      }
+      PlaybackArbiter.setRate(wanted, 'drift');
       return wanted;
     },
 
@@ -4810,7 +5029,7 @@
         if (this._startupAlignTicks >= 2 && this.isTimeBuffered(this.audio, vTime)) {
           this._startupAlignDone = true;
           this._lastSeekTime = now;
-          try { this.audio.currentTime = vTime; } catch (e) {}
+          PlaybackArbiter.seekAudio(vTime, 'startup-align');
           this._lastAudioTime = vTime;
           this._lastAudioAdvance = now;
           console.log(TAG, `[StudioEngine774] Startup align: ${(sm * 1000).toFixed(0)}ms residual inside the 300-450ms dead zone -> snapped audio to video ${vTime.toFixed(2)}s`);
@@ -4826,7 +5045,12 @@
       } else if (smMs < 300 || smMs > 1500) {
         this._startupAlignTicks = 0;
       }
-      if (smMs > 300) {
+      // Mid-run band: extended from 300 ms to 450 ms so a post-stall 300-450 ms residual is
+      // converged smoothly by the rate controller instead of sitting in the old dead zone.
+      // Above 450 ms the existing hard audio resync (audio behind) takes over; a snap here
+      // would introduce a deliberate replay, which is itself an audible symptom.
+      const rateBandMaxMs = IS_FIREFOX ? 450 : 300; // Chrome keeps the shipped 300 ms band
+      if (smMs > rateBandMaxMs) {
         this._driftSmooth = null;
         this._driftHist = [];
         this._corrActive = false;
@@ -4878,9 +5102,7 @@
       }
       if (!this.isActive || !this.audio || !this.audio.src) return;
       if (this.isAdActive()) {
-        if (!this.audio.paused) {
-          try { this.audio.pause(); } catch (e) {}
-        }
+        PlaybackArbiter.pauseAudio('watchdog-ad-active');
         const v = getMainVideoElement();
         if (v) this.restoreNativeVideo(v);
         return;
@@ -4930,7 +5152,7 @@
           // Audio ahead of video (video throttled by browser): advance video
           if (drift > 1.5 && !video.seeking && !this._isInternalVideoSync) {
             this._isInternalVideoSync = true;
-            video.currentTime = aTime;
+            PlaybackArbiter.seekPlayer(aTime, 'hidden-watchdog-advance');
             setTimeout(() => { this._isInternalVideoSync = false; }, 200);
           }
 
@@ -4939,13 +5161,14 @@
               this._hasDispatchedEnded = true;
               this._trackEnded = true;
               this._isInternalVideoSync = true;
-              video.currentTime = video.duration;
+              PlaybackArbiter.ended('hidden-watchdog-ended');
+              PlaybackArbiter.seekPlayer(video.duration, 'hidden-watchdog-ended');
               if (this.shouldAutoplayNext()) {
                 if (!video.ended) {
                   video.dispatchEvent(new Event('ended', { bubbles: true }));
                 }
               } else {
-                try { video.pause(); } catch (e) {}
+                PlaybackArbiter.pauseVideo('hidden-watchdog-ended');
               }
               setTimeout(() => { this._isInternalVideoSync = false; }, 200);
             }
@@ -4976,18 +5199,16 @@
           if (this.isLoopActive()) {
             this._trackEnded = false;
             if (this.audio) {
-              this.audio.currentTime = 0;
-              this.audio.play().catch(() => {});
+              PlaybackArbiter.seekAudio(0, 'loop-replay');
+              PlaybackArbiter.playAudio('loop-replay');
             }
-            try { video.currentTime = 0; } catch (e) {}
-            if (video.paused) {
-              video.play().catch(() => {});
-            }
+            PlaybackArbiter.seekPlayer(0, 'loop-replay');
+            PlaybackArbiter.playVideo('loop-replay');
             return;
           }
           // Video ended naturally; do NOT abruptly kill audio while audio is finishing its last moments
           if (this.audio.ended || (this.audio.duration && this.audio.currentTime >= this.audio.duration - 0.5)) {
-            if (!this.audio.paused) this.audio.pause();
+            PlaybackArbiter.pauseAudio('watchdog-video-ended');
             this._trackEnded = true;
           }
           return;
@@ -5002,25 +5223,20 @@
           if (this.isLoopActive()) {
             this._trackEnded = false;
             if (this.audio) {
-              this.audio.currentTime = 0;
-              this.audio.play().catch(() => {});
+              PlaybackArbiter.seekAudio(0, 'loop-replay');
+              PlaybackArbiter.playAudio('loop-replay');
             }
-            try { video.currentTime = 0; } catch (e) {}
-            if (video.paused) {
-              video.play().catch(() => {});
-            }
+            PlaybackArbiter.seekPlayer(0, 'loop-replay');
+            PlaybackArbiter.playVideo('loop-replay');
             return;
           }
           this._trackEnded = true;
-          if (video && !video.paused) {
-            try { video.pause(); } catch (e) {}
-          }
-          if (!this.audio.paused) this.audio.pause();
+          PlaybackArbiter.ended('watchdog-player-state-0');
+          PlaybackArbiter.pauseVideo('watchdog-player-state-0');
+          PlaybackArbiter.pauseAudio('watchdog-player-state-0');
           return;
         }
-        if (!this.audio.paused) {
-          this.audio.pause();
-        }
+        PlaybackArbiter.pauseAudio('watchdog-video-paused');
         return;
       }
 
@@ -5029,12 +5245,9 @@
       if (this._trackEnded || video.ended || isAudioFinished) {
         if (!this.isLoopActive()) {
           this._trackEnded = true;
-          if (video && !video.paused) {
-            try { video.pause(); } catch (e) {}
-          }
-          if (this.audio && !this.audio.paused) {
-            try { this.audio.pause(); } catch (e) {}
-          }
+          PlaybackArbiter.ended('watchdog-track-end');
+          PlaybackArbiter.pauseVideo('watchdog-track-end');
+          PlaybackArbiter.pauseAudio('watchdog-track-end');
           if (this.shouldAutoplayNext()) {
             const player = document.getElementById('movie_player');
             if (player && !this._advanceFallbackTimer) {
@@ -5088,7 +5301,7 @@
           if (!strictlyCovered && forwardStart !== null) {
             const snapTarget = (vTime >= forwardStart && vTime < forwardEnd - 0.05) ? vTime : (forwardStart + 0.02);
             console.log(TAG, `[StudioEngine774 Watchdog] Snapping audio across cluster gap ${aTime.toFixed(2)}s -> ${snapTarget.toFixed(2)}s (buffered ${forwardStart.toFixed(2)}s..${forwardEnd.toFixed(2)}s)`);
-            this.audio.currentTime = snapTarget;
+            PlaybackArbiter.seekAudio(snapTarget, 'cluster-gap-rescue');
             this._isAudioBuffering = false;
             this._audioStalledAt = 0;
             if (!video.paused && this.audio.paused && !this._userPaused) {
@@ -5108,7 +5321,7 @@
           // If audio is stalled and video is ahead (e.g. gap between MSE chunks), jump audio across the gap!
           if (vTime > aTime && vTime - aTime < 3.0) {
             console.log(TAG, `[StudioEngine774 Watchdog] Audio gap detected at ${aTime.toFixed(2)}s (video at ${vTime.toFixed(2)}s). Jumping gap to ${vTime.toFixed(2)}s...`);
-            this.audio.currentTime = vTime;
+            PlaybackArbiter.seekAudio(vTime, 'watchdog-gap-jump');
             this._tryPlayAudio();
             this._lastAudioTime = vTime;
             this._lastAudioAdvance = Date.now();
@@ -5154,7 +5367,7 @@
       // Audio MUST follow video! NEVER pull video back to old audio position!
       if (absDiff > 1.5 && !video.seeking && !this._isSeeking && !this._isAudioBuffering) {
         this._lastSeekTime = now;
-        this.audio.currentTime = vTime;
+        PlaybackArbiter.seekAudio(vTime, 'watchdog-hard-resync');
         if (UmpMseController774.isActive) {
           UmpMseController774.onSeek(vTime, { userSeek: false });
         }
@@ -5171,7 +5384,7 @@
       if (absDiff > 0.45 && absDiff <= 1.5 && drift < 0 && !this._isAudioBuffering && !this.audio.paused && canResyncAudio) {
         if (this.isTimeBuffered(this.audio, vTime)) {
           this._lastSeekTime = now;
-          try { this.audio.currentTime = vTime; } catch (e) {}
+          PlaybackArbiter.seekAudio(vTime, 'watchdog-slave-resync');
           this._lastAudioTime = vTime;
           this._lastAudioAdvance = Date.now();
         }
@@ -5208,6 +5421,7 @@
       }
       this._initialMetaSynced = false;
       this.isActive = true;
+      PlaybackArbiter.attachStart(videoId, 'applyToVideo');
       // P0.1: open the one-shot startup alignment window for this stream.
       this._startupAlignUntil = Date.now() + 15000;
       this._startupAlignDone = false;
@@ -5251,13 +5465,7 @@
       this._silenceElement(mainVideo);
 
       if (this.audio.src !== streamUrl) {
-        try {
-          this.audio.pause();
-          this.audio.removeAttribute('src');
-          this.audio.load();
-        } catch (e) {}
-        this.audio.src = streamUrl;
-        this.audio.load();
+        PlaybackArbiter.setSource(streamUrl, 'applyToVideo', videoId);
       }
       ChannelHealth.attach(this.audio);
 
@@ -5265,9 +5473,7 @@
       // Using getVideoTimeFor(videoId) prevents reading the outgoing track's currentTime during SPA transitions.
       const startSec = getVideoTimeFor(videoId);
       if (startSec > 0.8) {
-        try {
-          this.audio.currentTime = startSec;
-        } catch (e) {}
+        PlaybackArbiter.seekAudio(startSec, 'applyToVideo-start', { videoId: videoId });
       }
       this.applyAudioRate(mainVideo);
 
@@ -5275,17 +5481,7 @@
 
       const isPlayerPlaying = !mainVideo.paused || (document.hidden && document.getElementById('movie_player')?.getPlayerState?.() === 1);
       if (isPlayerPlaying && !this.isAdActive() && !this._userPaused) {
-        this.audio.play().catch((err) => {
-          if (err && err.name === 'NotAllowedError') {
-            const resume = () => {
-              if (this.isActive && this.audio && !mainVideo.paused && !this.isAdActive() && !this._userPaused) {
-                this.audio.play().catch(() => {});
-              }
-            };
-            window.addEventListener('click', resume, { once: true, capture: true });
-            window.addEventListener('keydown', resume, { once: true, capture: true });
-          }
-        });
+        PlaybackArbiter.playAudio('applyToVideo');
       }
 
       this.startWatchdog();
@@ -5330,10 +5526,7 @@
         this.activeVideoId = videoId;
         this.best774Candidate = best774;
         if (isCurrent && this.audio && this.audio.src !== streamUrl) {
-          try {
-            this.audio.src = streamUrl;
-            this.audio.load();
-          } catch (e) {}
+          PlaybackArbiter.setSource(streamUrl, 'load774-pending', videoId);
         }
         this.waitForVideo();
 
@@ -5372,6 +5565,7 @@
       UmpMseController774.stop();
 
       const forceDisableCleanup = !S.enabled || reason === 'Extension Disabled';
+      PlaybackArbiter.detach(reason || 'stopAndUnmute');
       if (!forceDisableCleanup && !this.isActive && !this._isTransitioning && !this.pending774) {
         return; // Already cleanly running native; do not disrupt video!
       }
@@ -5414,8 +5608,8 @@
         this._waiterTimer = null;
       }
       if (this.audio) {
+        PlaybackArbiter.pauseAudio('stopAndUnmute');
         try {
-          this.audio.pause();
           this.audio.removeAttribute('src');
           this.audio.load();
         } catch (e) {}
@@ -7720,6 +7914,10 @@
   // Pure HQ audio stream with zero video GPU rendering overhead
   function applyAudioOnlyState() {
     const player = document.getElementById('movie_player');
+    // K round (P2.9): a deliberate pause must be inert. Do not wake the player or churn the
+    // quality pipeline while the UI is parked in USER_PAUSED / ENDED.
+    const pausedIdle = typeof PlaybackArbiter !== 'undefined' &&
+      (PlaybackArbiter.state === 'USER_PAUSED' || PlaybackArbiter.state === 'ENDED');
     let overlay = document.getElementById('ytss-audio-only-overlay');
     const video = (typeof getMainVideoElement === 'function' ? getMainVideoElement() : document.querySelector('video'));
 
@@ -7774,21 +7972,22 @@
         overlay.style.display = 'none';
       }
       if (video) {
-        video.style.opacity = '1';
-        video.style.visibility = 'visible';
-        video.style.pointerEvents = '';
+        if (video.style.opacity !== '1') video.style.opacity = '1';
+        if (video.style.visibility !== 'visible') video.style.visibility = 'visible';
+        if (video.style.pointerEvents !== '') video.style.pointerEvents = '';
         if (typeof StudioEngine774 !== 'undefined' && StudioEngine774.isActive && StudioEngine774.audio) {
           // Symptom A: NEVER pull the native video back to the (possibly stale) audio position from
           // this per-second badge refresh. That write raced every user seek and yanked the video back
           // before the native seek settled, so UmpMseController774.onSeek(target) was never dispatched.
           // Never resurrect a deliberate pause from this per-second badge refresh: the play is
           // only there to re-glue the muted master video to the audible 774 stream.
-          if (video.paused && !StudioEngine774.audio.paused && !StudioEngine774._userPaused) {
-            video.play().catch(() => {});
+          if (video.paused && !StudioEngine774.audio.paused && !StudioEngine774._userPaused &&
+              PlaybackArbiter.canGlueVideo()) {
+            PlaybackArbiter.playVideo('badge-glue');
           }
         }
       }
-      if (player && typeof player.setPlaybackQuality === 'function') {
+      if (!pausedIdle && player && typeof player.setPlaybackQuality === 'function') {
         // Badge refreshes run on every player state change, including the end-of-track frame.
         // A quality call there makes the native player reload its media at 0:00, which used to
         // re-arm the outgoing 774 element (Bug 6). Never touch the player mid-transition or
@@ -7798,7 +7997,7 @@
           try { player.setPlaybackQuality('auto'); } catch (e) {}
         }
       }
-      if (player && typeof player.wakeUp === 'function') {
+      if (!pausedIdle && player && typeof player.wakeUp === 'function') {
         try { player.wakeUp(); } catch (e) {}
       }
     }
@@ -8031,23 +8230,41 @@
 
     paint(el, isHq, itag) {
       if (!el) return;
-      if (isHq) {
-        el.textContent = itag === 141 ? '★ 141' : '★ 774';
-        const c = itag === 141 ? '#5ec8d8' : '#e85a5a';
-        el.style.color = c;
-        el.style.borderColor = itag === 141 ? 'rgba(94,200,216,0.55)' : 'rgba(225,29,29,0.55)';
-        const bitrate = getActiveBitrate();
-        const method = status.activeMethod || ((S.operationMode === 'TV_HEADLESS' || S.operationMode === 'TV_RELAY') ? 'TVHTML5' : 'YTM_HARVESTER');
-        const isStudio = (typeof StudioEngine774 !== 'undefined' && StudioEngine774.isActive);
-        el.title = itag === 141
+      // K round (P2.9): no DOM write when the rendered value did not change. The badge is
+      // refreshed from many event paths; blind writes were the ~8/s churn while paused.
+      const text = isHq ? (itag === 141 ? '★ 141' : '★ 774') : '251';
+      const color = isHq ? (itag === 141 ? '#5ec8d8' : '#e85a5a') : '#8a8a8a';
+      const border = isHq
+        ? (itag === 141 ? 'rgba(94,200,216,0.55)' : 'rgba(225,29,29,0.55)')
+        : 'rgba(255,255,255,0.18)';
+      const bitrate = isHq ? getActiveBitrate() : null;
+      const method = status.activeMethod || ((S.operationMode === 'TV_HEADLESS' || S.operationMode === 'TV_RELAY') ? 'TVHTML5' : 'YTM_HARVESTER');
+      const isStudio = (typeof StudioEngine774 !== 'undefined' && StudioEngine774.isActive);
+      const title = isHq
+        ? (itag === 141
           ? 'Studio Master AAC 141 (256kbps Full Fidelity)'
-          : t(isStudio ? 'badgeTooltipStudio' : 'badgeTooltipNative', { itag, bitrate, method });
+          : t(isStudio ? 'badgeTooltipStudio' : 'badgeTooltipNative', { itag, bitrate, method }))
+        : t('badgeTooltip251');
+      if (el.textContent !== text) el.textContent = text;
+      if (el.style.color !== color) el.style.color = color;
+      if (el.style.borderColor !== border) el.style.borderColor = border;
+      if (el.title !== title) el.title = title;
+    },
+
+    // K round (P2.9): the 1 Hz refresh must not write DOM while playback is deliberately
+    // paused or ended. Keep a cheap 10 s presence check so a re-render of the control bar
+    // still gets its badge back, but do not repaint/glue/wake the player during the pause.
+    tick() {
+      if (!S.enabled) return;
+      const st = (typeof PlaybackArbiter !== 'undefined') ? PlaybackArbiter.state : 'DETACHED';
+      if (st === 'USER_PAUSED' || st === 'ENDED') {
+        this._idleTicks = (this._idleTicks || 0) + 1;
+        if (this._idleTicks % 10 !== 0) return;
+        if (document.getElementById('ytss-badge-bar') || document.getElementById('ytss-badge')) return;
       } else {
-        el.textContent = '251';
-        el.style.color = '#8a8a8a';
-        el.style.borderColor = 'rgba(255,255,255,0.18)';
-        el.title = t('badgeTooltip251');
+        this._idleTicks = 0;
       }
+      this.inject();
     },
 
     update() {
@@ -8184,7 +8401,7 @@
 
   setInterval(() => {
     if (S.enabled) {
-      PlayerBadgeUI.inject();
+      PlayerBadgeUI.tick();
       StudioEngine774.hookPlayer();
     }
     if (!isPlayerActiveOnPage() && (StudioEngine774.isActive || StudioEngine774._isTransitioning || StudioEngine774.pending774)) {
