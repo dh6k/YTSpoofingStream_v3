@@ -1650,6 +1650,103 @@
     session: null,
     isActive: false,
     videoId: null,
+    lastSourceHealth: null,
+    lastSupplyFailure: null,
+
+    _supplyState(session, state, reason) {
+      if (!IS_FIREFOX || !session) return;
+      session.supplyState = state;
+      session.supplyReason = String(reason || state);
+      ChannelHealth.note('ump-supply', { state, reason: session.supplyReason, videoId: session.videoId, failures: session.supplyFailures || 0 });
+    },
+
+    getSourceHealth(videoId) {
+      if (!IS_FIREFOX) return null;
+      const session = this.session;
+      if (!session || (videoId && session.videoId !== videoId)) {
+        return this.lastSourceHealth && (!videoId || this.lastSourceHealth.videoId === videoId) ? this.lastSourceHealth : null;
+      }
+      const now = Date.now();
+      const video = getMainVideoElement();
+      const cur = getVideoTimeFor(session.videoId);
+      const end = this.getBufferedEndFor(session.sourceBuffer, cur);
+      const ahead = end === null ? 0 : Math.max(0, end - cur);
+      const sample = session.supplySample;
+      if (!sample || now - sample.at >= 150) {
+        const playing = video && !video.paused && !video.seeking && !StudioEngine774._userPaused;
+        if (sample && playing && ahead < sample.ahead - 0.05) {
+          session.supplyDecreasingAt = session.supplyDecreasingAt || sample.at;
+        } else if (!sample || !playing || ahead > sample.ahead + 0.05) {
+          session.supplyDecreasingAt = 0;
+        }
+        session.supplySample = { at: now, ahead };
+      }
+      return {
+        source: 'TVHTML5', route: 'UMP', videoId: session.videoId,
+        state: session.aborted ? 'stopped' : (session.supplyState || (session.inFlight ? 'fetching' : 'healthy')),
+        reason: session.supplyReason || 'buffered', bufferAheadSec: ahead,
+        consumptionRate: Math.max(0.1, Number(video?.playbackRate || 1)),
+        responseLatencyMs: session.responseLatencyMs || 0,
+        decreasingForMs: session.supplyDecreasingAt ? now - session.supplyDecreasingAt : 0,
+        requestAgeMs: session.inFlight && session.requestStartedAt ? now - session.requestStartedAt : 0,
+        failures: session.supplyFailures || 0, lastProgressAt: session.lastProgressAt || 0,
+        fetching: !!session.inFlight, pumpStopped: !!(session.aborted || session.reachedEof),
+        queued: session.appendQueue.length
+      };
+    },
+
+    _supplyFallback(session, reason) {
+      if (!IS_FIREFOX || !session || session.aborted || this.session !== session) return;
+      this._supplyState(session, 'fallback', reason);
+      this.lastSupplyFailure = {
+        videoId: session.videoId,
+        context: `${session.tvCtx?.serverAbrStreamingUrl || ''}|${session.tvCtx?.ustreamerConfig || ''}`,
+        until: Date.now() + 30000, reason
+      };
+      this.lastSourceHealth = this.getSourceHealth(session.videoId);
+      console.warn(TAG, `[UmpMse774] Supply fallback for ${session.videoId}: ${reason}`);
+      // Restore native sound before an alternate harvest can take an unbounded round-trip.
+      // Keep the failure visible even when the engine was already detached.
+      const useAlternate = S.operationMode === OP_MODES.HYBRID_HQ && canHybridFailover(session.videoId, 'TVHTML5', 'YTM_HARVESTER');
+      status.activeAudioItag = 251;
+      status.activeMethod = 'original';
+      status.fallbackReason = reason;
+      report();
+      StudioEngine774.stopAndUnmute(reason, session.videoId);
+      if (useAlternate) handleHybridRuntimeFailover(session.videoId, 'TVHTML5', 'YTM_HARVESTER', reason);
+    },
+
+    _supplyFailure(session, reason, immediate = false) {
+      if (!IS_FIREFOX || !session || session.aborted || this.session !== session) return;
+      session.supplyFailures = (session.supplyFailures || 0) + 1;
+      session.supplyFailedAt = session.supplyFailedAt || Date.now();
+      if (immediate || session.supplyFailures >= 3 || Date.now() - session.supplyFailedAt >= 1800) {
+        this._supplyFallback(session, reason);
+        return;
+      }
+      session.retryAt = Date.now() + Math.min(600, 150 * (2 ** (session.supplyFailures - 1)));
+      this._supplyState(session, 'backoff', reason);
+    },
+
+    requestSupply(reason = 'low-buffer') {
+      if (!IS_FIREFOX) return false;
+      const session = this.session;
+      if (!session || session.aborted || !session.sourceBuffer) return false;
+      const health = this.getSourceHealth(session.videoId);
+      // A request with plenty of headroom may be slow; only supersede it before
+      // audible exhaustion. The generation guard drops its late body afterwards.
+      if (session.inFlight) {
+        if (health.requestAgeMs < 1500 || health.bufferAheadSec / health.consumptionRate > 2) return false;
+        session.requestTimedOut = true;
+        try { session.abortCtrl?.abort(); } catch (e) {}
+        if (session.rejectSupplyRequest) session.rejectSupplyRequest();
+        return true;
+      }
+      if (session.retryAt && Date.now() < session.retryAt) return false;
+      this._supplyState(session, 'refilling', reason);
+      this.pump(session);
+      return true;
+    },
 
     _extractOrigN(rawUrl) {
       if (!rawUrl || typeof rawUrl !== 'string') return null;
@@ -2095,11 +2192,39 @@
       }
       if (session.sourceBuffer.updating || session.appendQueue.length === 0) return;
       if (session.mediaSource.readyState !== 'open' && session.mediaSource.readyState !== 'ended') return;
-      const chunk = session.appendQueue.shift();
+      const chunk = IS_FIREFOX ? session.appendQueue[0] : session.appendQueue.shift();
       try {
-        PlaybackArbiter.appendBuffer(session, chunk, 'ump-pump');
+        const appended = PlaybackArbiter.appendBuffer(session, chunk, 'ump-pump', { throwOnError: IS_FIREFOX });
+        if (IS_FIREFOX) {
+          if (!appended) {
+            session.appendQueue.length = 0;
+            this.stopSession(session);
+            return;
+          }
+          session.appendQueue.shift();
+          session.appendStartedAt = Date.now();
+          session.lastProgressAt = Date.now();
+          session.supplyFailures = 0;
+          session.supplyFailedAt = 0;
+          session.quotaRetries = 0;
+          this._supplyState(session, 'healthy', 'segment-appended');
+        }
       } catch (err) {
         console.log(TAG, '[UmpMse774] appendBuffer error:', err);
+        if (IS_FIREFOX) {
+          if (err?.name === 'QuotaExceededError' && (session.quotaRetries || 0) < 2) {
+            session.quotaRetries = (session.quotaRetries || 0) + 1;
+            const cur = getVideoTimeFor(session.videoId);
+            const cut = Math.max(0, cur - 20);
+            const b = session.sourceBuffer.buffered;
+            if (cut > 0 && b.length && b.start(0) < cut) {
+              this._supplyState(session, 'evicting', 'MSE quota: retain pending segment and evict played audio');
+              session.appendStartedAt = Date.now();
+              try { session.sourceBuffer.remove(b.start(0), cut); return; } catch (e) {}
+            }
+          }
+          this._supplyFailure(session, `TV UMP MSE ${err?.name || 'append failed'}`, true);
+        }
       }
     },
 
@@ -2110,6 +2235,25 @@
       if (!isOwnedByEngine) {
         this.stopSession(session);
         return;
+      }
+      if (IS_FIREFOX) {
+        const nav = typeof StudioEngine774.navVidNow === 'function' ? StudioEngine774.navVidNow() : null;
+        if (nav && nav !== session.videoId) { this.stopSession(session); return; }
+        const health = this.getSourceHealth(session.videoId);
+        if (session.supplyFailedAt && Date.now() - session.supplyFailedAt >= 1800) {
+          this._supplyFallback(session, session.supplyReason || 'TV UMP supply exhausted');
+          return;
+        }
+        if (session.sourceBuffer?.updating && session.appendStartedAt && Date.now() - session.appendStartedAt >= 1800) {
+          this._supplyFallback(session, 'TV UMP MSE update stalled');
+          return;
+        }
+        if (session.inFlight) {
+          if (health.requestAgeMs >= 1500 && health.bufferAheadSec / health.consumptionRate <= 2) this.requestSupply('response-overdue');
+          return;
+        }
+        if (session.retryAt && Date.now() < session.retryAt) return;
+        if (session.appendQueue.length) { this.flushQueue(session); return; }
       }
       if (!session.sourceBuffer || session.inFlight) return;
 
@@ -2176,9 +2320,28 @@
       session.inFlightOwner = inflightOwner;
       const abortCtrl = new AbortController();
       session.abortCtrl = abortCtrl;
+      if (IS_FIREFOX) {
+        session.requestStartedAt = Date.now();
+        session.requestTimedOut = false;
+        this._supplyState(session, 'fetching', 'SABR request');
+      }
+      let responseTimer = null;
 
       try {
-        const baseUrl = await this.ensureDecipheredUrl(session);
+        const health = IS_FIREFOX ? this.getSourceHealth(session.videoId) : null;
+        // Timeout covers decipher, fetch headers AND the response body. With a
+        // low buffer, fail visibly inside 2 s; healthy lookahead tolerates 5 s bursts.
+        const budget = health ? Math.max(1500, Math.min(6000, health.bufferAheadSec / health.consumptionRate * 750)) : 0;
+        const timeout = IS_FIREFOX ? new Promise((resolve, reject) => {
+          session.rejectSupplyRequest = () => reject(Object.assign(new Error('SABR supply deadline'), { name: 'TimeoutError' }));
+          responseTimer = setTimeout(() => {
+            session.requestTimedOut = true;
+            try { abortCtrl.abort(); } catch (e) {}
+            reject(Object.assign(new Error('SABR supply deadline'), { name: 'TimeoutError' }));
+          }, budget);
+        }) : null;
+        const bounded = promise => timeout ? Promise.race([promise, timeout]) : promise;
+        const baseUrl = await bounded(this.ensureDecipheredUrl(session));
         if (!baseUrl || session.aborted || reqGen !== session.reqGen) return;
 
         const reqBytes = this.buildAbrRequestBytes(session, targetMs);
@@ -2186,15 +2349,16 @@
         u.searchParams.set('alr', 'yes');
         u.searchParams.set('rn', String(++session.rn));
 
-        const resp = await ORIGINAL_FETCH.call(window, u.toString(), {
+        const resp = await bounded(ORIGINAL_FETCH.call(window, u.toString(), {
           method: 'POST',
           body: reqBytes,
           signal: abortCtrl.signal
-        });
+        }));
 
         if (session.aborted || reqGen !== session.reqGen) return;
         if (!resp.ok) {
           console.log(TAG, `[UmpMse774] SABR POST HTTP ${resp.status} for ${session.videoId}`);
+          if (IS_FIREFOX) { this._supplyFailure(session, `TV UMP HTTP ${resp.status}`); return; }
           session.errorCount = (session.errorCount || 0) + 1;
           if (session.errorCount >= 3) {
             if (S.operationMode === OP_MODES.HYBRID_HQ && canHybridFailover(session.videoId, 'TVHTML5', 'YTM_HARVESTER')) {
@@ -2206,8 +2370,9 @@
           return;
         }
 
-        const buf = new Uint8Array(await resp.arrayBuffer());
+        const buf = new Uint8Array(await bounded(resp.arrayBuffer()));
         if (session.aborted || reqGen !== session.reqGen) return;
+        if (IS_FIREFOX) session.responseLatencyMs = Date.now() - session.requestStartedAt;
 
         const demuxed = this.demuxUmp774(buf);
         if (demuxed.nextPlaybackCookie) {
@@ -2216,6 +2381,7 @@
         if (demuxed.redirectUrl) {
           session.redirectCount = (session.redirectCount || 0) + 1;
           if (session.redirectCount > 8) {
+            if (IS_FIREFOX) { this._supplyFailure(session, 'TV UMP Redirect Loop', true); return; }
             console.log(TAG, `[UmpMse774] Too many SabrRedirects (${session.redirectCount}) on ${session.videoId}`);
             session.errorCount = (session.errorCount || 0) + 1;
             if (session.errorCount >= 3) {
@@ -2239,6 +2405,16 @@
         }
 
         if (demuxed.segments.length === 0) {
+          if (IS_FIREFOX) {
+            const durSec = session.durationSec || (video && video.duration > 0 ? video.duration : 0);
+            if (durSec > 0 && targetMs >= durSec * 1000 - 200 && session.hasInit) {
+              session.reachedEof = true;
+              this._supplyState(session, 'ended', 'known-duration-end');
+            } else {
+              this._supplyFailure(session, demuxed.sabrError ? 'TV UMP SabrError' : 'TV UMP empty response (not EOF)');
+            }
+            return;
+          }
           if (demuxed.sabrError) {
             session.errorCount = (session.errorCount || 0) + 1;
             if (session.errorCount >= 3) {
@@ -2272,6 +2448,7 @@
         session.errorCount = 0;
         session.redirectCount = 0;
         session.emptyResponses = 0;
+        let queuedMedia = 0;
         for (const seg of demuxed.segments) {
           if (seg.isInit) {
             const initInfo = this.opusInitChannelInfo(seg.data);
@@ -2282,10 +2459,16 @@
               session.initChannels = initInfo ? initInfo.opusChannels : null;
               console.log(TAG, `[UmpMse774] Queued 774 WebM Init Segment (${seg.data.length}B, opusCh=${initInfo && initInfo.opusChannels}, trackCh=${initInfo && initInfo.trackChannels}, map=${initInfo && initInfo.mappingFamily}) for ${session.videoId}`);
             } else if (initInfo && session.initChannels && initInfo.opusChannels !== session.initChannels) {
+              if (IS_FIREFOX) { this._supplyFailure(session, `TV UMP OpusHead channels changed ${session.initChannels} -> ${initInfo.opusChannels}`, true); return; }
               // Channel-changing init mid-stream: appending it would downmix silently on Firefox.
               console.warn(TAG, `[UmpMse774] IGNORED channel-changing init for ${session.videoId}: session=${session.initChannels}ch arrived=${initInfo.opusChannels}ch (${seg.data.length}B)`);
             }
           } else {
+            if (IS_FIREFOX && session.lastContigEndMs && seg.startMs > session.lastContigEndMs + 200 && seekTarget === null) {
+              const health = this.getSourceHealth(session.videoId);
+              this._supplyFailure(session, `TV UMP cluster gap ${Math.round(seg.startMs - session.lastContigEndMs)}ms`, health.bufferAheadSec <= 2);
+              return;
+            }
             if (session.seekTargetSec !== null) {
               session.seekTargetSec = null;
             }
@@ -2300,6 +2483,7 @@
               console.log(TAG, `[UmpMse774] Skipped duplicate cluster seq=${seg.seq} (last appended=${session.lastAppendedSeq}, skipped=${session.dupsSkipped})`);
             } else {
               session.appendQueue.push(seg.data);
+              queuedMedia++;
               session.lastAppendedSeq = seg.seq;
               session.lastContigEndMs = seg.startMs + seg.durMs;
               console.log(TAG, `[UmpMse774] ★ Demuxed 774 segment seq=${seg.seq} (${(seg.startMs / 1000).toFixed(2)}s..${((seg.startMs + seg.durMs) / 1000).toFixed(2)}s, ${seg.data.length}B)`);
@@ -2307,12 +2491,22 @@
           }
         }
 
+        if (IS_FIREFOX && !queuedMedia && session.appendQueue.length === 0) {
+          this._supplyFailure(session, 'TV UMP response made no media progress');
+          return;
+        }
+
         this.flushQueue(session);
       } catch (err) {
         if (err?.name !== 'AbortError') {
           console.log(TAG, '[UmpMse774] pump fetch error:', err);
         }
+        if (IS_FIREFOX && !session.aborted && reqGen === session.reqGen && (err?.name !== 'AbortError' || session.requestTimedOut)) {
+          const health = this.getSourceHealth(session.videoId);
+          this._supplyFailure(session, `TV UMP ${session.requestTimedOut ? 'response timeout' : 'fetch error'}`, session.requestTimedOut && health.bufferAheadSec / health.consumptionRate <= 2);
+        }
       } finally {
+        if (responseTimer) clearTimeout(responseTimer);
         // Only the request that currently owns the in-flight slot may release it. The old
         // unconditional `session.inFlight = false` let a superseded request's late completion
         // clobber a newer request's ownership, which spawned duplicate concurrent SABR
@@ -2320,6 +2514,7 @@
         if (session.inFlightOwner === inflightOwner) {
           session.inFlight = false;
           session.inFlightOwner = null;
+          if (IS_FIREFOX) session.rejectSupplyRequest = null;
         }
         if (session.abortCtrl === abortCtrl) {
           session.abortCtrl = null;
@@ -2471,6 +2666,10 @@
 
     stopSession(session) {
       if (!session || session.aborted) return;
+      if (IS_FIREFOX) {
+        if (session.supplyState !== 'fallback') this._supplyState(session, 'stopped', 'session-stopped');
+        this.lastSourceHealth = { ...this.getSourceHealth(session.videoId), pumpStopped: true, fetching: false, requestAgeMs: 0, queued: 0 };
+      }
       session.aborted = true;
       if (session.timer) {
         clearInterval(session.timer);
@@ -2483,6 +2682,12 @@
       if (session.abortCtrl) {
         try { session.abortCtrl.abort(); } catch (e) {}
         session.abortCtrl = null;
+      }
+      session.appendQueue.length = 0;
+      if (IS_FIREFOX) {
+        if (session.rejectSupplyRequest) session.rejectSupplyRequest();
+        session.rejectSupplyRequest = null;
+        if (session.sourceOpenTimer) clearTimeout(session.sourceOpenTimer);
       }
       if (session.blobUrl) {
         const oldUrl = session.blobUrl;
@@ -2508,6 +2713,12 @@
 
     attachAndLoad(videoId, best774, tvCtx) {
       if (!videoId || !best774 || !tvCtx?.serverAbrStreamingUrl || !tvCtx?.ustreamerConfig) {
+        return false;
+      }
+      if (IS_FIREFOX && this.lastSupplyFailure?.videoId === videoId && Date.now() < this.lastSupplyFailure.until &&
+          this.lastSupplyFailure.context === `${tvCtx.serverAbrStreamingUrl}|${tvCtx.ustreamerConfig}` && !tvCtx.forceFresh) {
+        // A periodic badge/quality re-arm must not immediately re-use the exact
+        // exhausted SABR context. Fresh supply or the bounded cooldown permits retry.
         return false;
       }
       const isEngineHolding = (StudioEngine774.isActive && StudioEngine774.activeVideoId === videoId) ||
@@ -2579,11 +2790,17 @@
       };
 
       this.session = session;
+      if (IS_FIREFOX) {
+        this.lastSourceHealth = null;
+        session.lastProgressAt = Date.now();
+        this._supplyState(session, 'attaching', 'sourceopen-pending');
+      }
       this.isActive = true;
       this.videoId = videoId;
 
       mediaSource.addEventListener('sourceopen', () => {
         if (session.aborted || this.session !== session) return;
+        if (IS_FIREFOX && session.sourceOpenTimer) clearTimeout(session.sourceOpenTimer);
         try {
           if (session.durationSec > 0 && isFinite(session.durationSec)) {
             mediaSource.duration = session.durationSec;
@@ -2594,6 +2811,7 @@
 
           sb.addEventListener('updateend', () => {
             if (session.aborted || this.session !== session) return;
+            if (IS_FIREFOX) session.appendStartedAt = 0;
             if (session.appendQueue.length > 0) {
               this.flushQueue(session);
               return;
@@ -2650,6 +2868,12 @@
               }
             }
           });
+          if (IS_FIREFOX) {
+            sb.addEventListener('error', () => this._supplyFailure(session, 'TV UMP MSE decode error', true));
+            sb.addEventListener('abort', () => {
+              if (!session.aborted) this._supplyFailure(session, 'TV UMP MSE append aborted', true);
+            });
+          }
 
           this.pump(session);
           // Lever 2: the 400ms timer is only a safety net for missed updateend events; normal
@@ -2662,6 +2886,11 @@
           StudioEngine774.stopAndUnmute('MSE SourceBuffer init failed');
         }
       }, { once: true });
+      if (IS_FIREFOX) {
+        session.sourceOpenTimer = setTimeout(() => {
+          if (!session.sourceBuffer) this._supplyFailure(session, 'TV UMP MSE sourceopen timeout', true);
+        }, 1800);
+      }
 
       const umpFmt = {
         ...best774,
@@ -2932,12 +3161,15 @@
       } catch (x) { return false; }
     },
 
-    appendBuffer(session, chunk, reason) {
+    appendBuffer(session, chunk, reason, opts) {
       if (!session || session.aborted || !session.sourceBuffer) return false;
       if (!this.ownerOk(session.videoId, 'append')) return false;
       this.ops.append++;
       this._note('op', 'append:' + reason, { bytes: chunk && chunk.byteLength ? chunk.byteLength : null, seq: session.lastAppendedSeq });
-      try { session.sourceBuffer.appendBuffer(chunk); return true; } catch (x) { return false; }
+      try { session.sourceBuffer.appendBuffer(chunk); return true; } catch (x) {
+        if (opts?.throwOnError) throw x;
+        return false;
+      }
     },
 
     canGlueVideo() {
