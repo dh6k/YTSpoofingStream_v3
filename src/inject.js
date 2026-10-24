@@ -357,9 +357,12 @@
   // only; every normal build keeps it false and the logger is off unless localStorage opts in.
   const DEBUG_CHANNEL_HEALTH_BUILD = false;
   const ChannelHealth = (() => {
-    let on = false;
-    try { on = IS_FIREFOX && (DEBUG_CHANNEL_HEALTH_BUILD || localStorage.getItem('ytss_debug_channel_health') === '1'); } catch (e) {}
-    if (!on) return { enabled: false, attach() {}, note() {}, noteInit() {} };
+    // Firefox uses the read-only signal tap for recovery even with diagnostics off.
+    // Logging/storage remain opt-in; Chrome never constructs the tap.
+    const on = IS_FIREFOX;
+    let logging = false;
+    try { logging = on && (DEBUG_CHANNEL_HEALTH_BUILD || localStorage.getItem('ytss_debug_channel_health') === '1'); } catch (e) {}
+    if (!on) return { enabled: false, attach() {}, note() {}, noteInit() {}, signal() { return null; }, release() {} };
 
     const events = [];
     const RING = 20000, SAMPLE_MS = 250, DEAD_DB = -50, LIVE_DB = -30, SILENT_DB = -60;
@@ -368,6 +371,7 @@
     let deadStart = 0, deadLogged = false, silStart = 0, silLogged = false;
     let tapIdleLogged = false, lastRate = -1, monoNoteSrc = '', unavailableSrc = '';
     let lastEl = null, attachTimer = null;
+    let signal = null;
 
     function kill(reason) {
       if (dead) return;
@@ -409,7 +413,7 @@
       try { localStorage.setItem('ytss_channel_health_log', JSON.stringify(events.slice(-50))); } catch (e) {}
     }
     function _note(kind, extra) {
-      if (dead || !on) return null;
+      if (dead || !logging) return null;
       const ev = Object.assign({ t: Date.now(), kind }, stateOf(), extra || {});
       events.push(ev);
       if (events.length > RING) events.shift();
@@ -441,6 +445,7 @@
       try { tapGraph.forEach((n) => { try { n.disconnect(); } catch (e) {} }); } catch (e) {}
       tapGraph = [];
       tapEl = null; tapSrc = ''; anL = null; anR = null; lastRate = -1;
+      signal = null;
       deadStart = 0; deadLogged = false; silStart = 0; silLogged = false;
     }
     function _attach(el) {
@@ -488,14 +493,16 @@
     function _sample() {
       if (dead || !on || !tapEl || !anL || !anR || !ctx) return;
       if (ctx.state !== 'running') {
+        signal = null;
         if (!tapIdleLogged) { tapIdleLogged = true; _note('tap-suspended', { ctx: ctx.state }); }
         return;
       }
       const el = tapEl;
       const cur = el.currentSrc || el.src || '';
       if (tapSrc && cur !== tapSrc) { stopTap(); return; }
-      if (el.paused || el.ended || el.readyState < 2) { deadStart = 0; deadLogged = false; silStart = 0; silLogged = false; return; }
+      if (el.paused || el.ended || el.readyState < 2) { signal = null; deadStart = 0; deadLogged = false; silStart = 0; silLogged = false; return; }
       const dL = db(rms(anL)), dR = db(rms(anR)), now = Date.now();
+      signal = { at: now, silent: dL <= SILENT_DB && dR <= SILENT_DB, l: dL, r: dR, src: tapSrc };
       const extra = {
         l: dL, r: dR, dLR: Math.round((dL - dR) * 10) / 10,
         ahead: bufferedAhead(el), rs: el.readyState,
@@ -511,7 +518,7 @@
         if (!deadStart) deadStart = now;
         if (!deadLogged && now - deadStart >= 200) {
           deadLogged = true;
-          try { console.warn(TAG, '[ChannelHealth] ONE CHANNEL LOST', JSON.stringify(Object.assign({ heldMs: now - deadStart }, extra, stateOf()))); } catch (e) {}
+          if (logging) try { console.warn(TAG, '[ChannelHealth] ONE CHANNEL LOST', JSON.stringify(Object.assign({ heldMs: now - deadStart }, extra, stateOf()))); } catch (e) {}
           _note('channel-loss', Object.assign({ heldMs: now - deadStart }, extra));
         }
       } else {
@@ -523,7 +530,7 @@
         if (!silStart) silStart = now;
         if (!silLogged && now - silStart >= 500) {
           silLogged = true;
-          try { console.warn(TAG, '[ChannelHealth] AUDIO SILENCE', JSON.stringify(Object.assign({ heldMs: now - silStart }, extra, stateOf()))); } catch (e) {}
+          if (logging) try { console.warn(TAG, '[ChannelHealth] AUDIO SILENCE', JSON.stringify(Object.assign({ heldMs: now - silStart }, extra, stateOf()))); } catch (e) {}
           _note('audio-silence', Object.assign({ heldMs: now - silStart }, extra));
         }
       } else { silStart = 0; silLogged = false; }
@@ -547,12 +554,14 @@
         if (dead || tapEl || !lastEl) return;
         try { _attach(lastEl); } catch (e) { kill(e && e.message || e); }
       }, 500);
-      console.info(TAG, '[ChannelHealth] enabled. Dump with __ytssChannelHealth.dump()');
+      if (logging) console.info(TAG, '[ChannelHealth] enabled. Dump with __ytssChannelHealth.dump()');
     } catch (e) { kill(e && e.message || e); }
     return {
-      enabled: true,
+      enabled: logging,
       attach: protect(_attach),
       note: protect(_note),
+      signal: () => !dead && signal && Date.now() - signal.at < 750 ? signal : null,
+      release: protect(() => { lastEl = null; stopTap(); }),
       noteInit: protect(_noteInit),
     };
   })();
@@ -722,6 +731,14 @@
   }
   const isCurrentTarget = isCurrentWatchVideo;
 
+  function ownsCurrentSupply(videoId) {
+    if (!IS_FIREFOX) return isCurrentWatchVideo(videoId);
+    if (!isCurrentWatchVideo(videoId)) return false;
+    const urlVid = getVideoIdFromUrl();
+    const playerVid = document.getElementById('movie_player')?.getVideoData?.()?.video_id;
+    return (!urlVid || urlVid === videoId) && (!playerVid || playerVid === videoId);
+  }
+
   function getVideoTimeFor(videoId) {
     const player = document.getElementById('movie_player');
     const playerVid = player?.getVideoData?.()?.video_id;
@@ -818,6 +835,7 @@
             streamingContext: e.data.streamingContext || null,
             confirmedNo774: !!e.data.confirmedNo774,
             error: e.data.error || null,
+            supplyStatus: e.data.supplyStatus || null,
           });
         }
       }
@@ -854,8 +872,9 @@
       // 12s timeout: SW may need to restart after being killed by Chrome (~30s idle).
       setTimeout(() => {
         window.removeEventListener('message', onMessage);
-        resolve({ results: [], streamingContext: null, error: 'HARVEST_TIMEOUT' });
-      }, 12000);
+        resolve({ results: [], streamingContext: null, error: 'HARVEST_TIMEOUT',
+          supplyStatus: IS_FIREFOX ? { route: 'YTM_HARVESTER', code: 'BRIDGE_TIMEOUT', action: 'fallback', recoverable: true } : null });
+      }, IS_FIREFOX ? 2000 : 12000);
     });
   }
 
@@ -872,7 +891,8 @@
       const failedSet = failedSourcesPerVideo.get(videoId);
       if (failedSet && failedSet.size > 0) {
         if (failedSet.has('TVHTML5') && failedSet.has('YTM_HARVESTER')) {
-          return { formats: [], streamingContext: null };
+          return { formats: [], streamingContext: null,
+            ...(IS_FIREFOX ? { supplyStatus: { code: 'SOURCES_EXHAUSTED', action: 'fallback', recoverable: true } } : {}) };
         }
         if (failedSet.has('TVHTML5')) {
           opts = { ...opts, preferredSource: 'YTM_HARVESTER', excludeSource: 'TVHTML5' };
@@ -890,7 +910,8 @@
       if (cached && (cached.formats?.length > 0 || cached.streamingContext)) return cached;
 
       const failedAt = failedFetches.get(videoId);
-      if (failedAt && Date.now() - failedAt < FAILED_RETRY_MS) return { formats: [], streamingContext: null };
+      if (failedAt && Date.now() - failedAt < FAILED_RETRY_MS) return { formats: [], streamingContext: null,
+        ...(IS_FIREFOX ? { supplyStatus: { code: 'RETRY_BACKOFF', action: 'fallback', recoverable: true } } : {}) };
     }
 
     const isCurrentVideo = isCurrentWatchVideo(videoId);
@@ -907,12 +928,34 @@
     }
 
     const myGen = fetchGeneration;
-    const fetchPromise = fetchHQViaSW(videoId, opts).then(({ results, streamingContext, confirmedNo774, error }) => {
-      if (myGen !== fetchGeneration || !S.enabled) {
+    const fetchPromise = fetchHQViaSW(videoId, opts).then(({ results, streamingContext, confirmedNo774, error, supplyStatus }) => {
+      if (myGen !== fetchGeneration || !S.enabled || (IS_FIREFOX && pendingFetches.get(videoId) !== fetchPromise)) {
         if (pendingFetches.get(videoId) === fetchPromise) {
           pendingFetches.delete(videoId);
         }
         return { formats: [], streamingContext: null, cancelled: true, superseded: true };
+      }
+
+      if (IS_FIREFOX && error === 'HARVEST_CANCELLED') {
+        if (pendingFetches.get(videoId) === fetchPromise) pendingFetches.delete(videoId);
+        return { formats: [], streamingContext: null, cancelled: true };
+      }
+
+      if (IS_FIREFOX && supplyStatus && !results.some(r => r.audioFormats?.some(f => (f.itag === 774 || f._origItag === 774) && (f.url || f.signatureCipher))) && !streamingContext) {
+        if (pendingFetches.get(videoId) === fetchPromise) pendingFetches.delete(videoId);
+        failedFetches.set(videoId, Date.now());
+        if (confirmedNo774) confirmedNo774Videos.add(videoId);
+        if (ownsCurrentSupply(videoId)) {
+          const reason = `774 supply: ${supplyStatus.route || 'YTM_HARVESTER'} / ${supplyStatus.code || error || 'unavailable'}`;
+          StudioEngine774.stopAndUnmute(reason, videoId);
+          status.activeAudioItag = 251;
+          status.activeMethod = 'original';
+          status.fallbackReason = reason;
+          status.supplyHealth = supplyStatus;
+          report();
+          if (typeof PlayerBadgeUI !== 'undefined') PlayerBadgeUI.update();
+        }
+        return { formats: [], streamingContext: null, supplyStatus, error };
       }
 
       if (error === 'HARVEST_CANCELLED' || error === 'HARVEST_TIMEOUT') {
@@ -923,7 +966,7 @@
       }
 
       if (confirmedNo774) {
-        if (isCurrentWatchVideo(videoId)) {
+        if (ownsCurrentSupply(videoId)) {
           confirmedNo774Videos.add(videoId);
           failedFetches.set(videoId, Date.now());
         }
@@ -931,10 +974,10 @@
           pendingFetches.delete(videoId);
         }
         console.log(TAG, `[HQ] Video ${videoId} reported NO 774 from SW. Marked as confirmedNo774.`);
-        if (isCurrentWatchVideo(videoId) && (StudioEngine774.isActive || StudioEngine774._isTransitioning)) {
+        if (ownsCurrentSupply(videoId) && (StudioEngine774.isActive || StudioEngine774._isTransitioning)) {
           StudioEngine774.stopAndUnmute('No 774 stream available for this video', videoId);
         }
-        return { formats: [], streamingContext: null };
+        return { formats: [], streamingContext: null, ...(IS_FIREFOX ? { confirmedNo774: true } : {}) };
       }
 
       const merged = [];
@@ -979,8 +1022,12 @@
       }
 
       hqCache.delete(videoId);
-      const only774 = merged.filter(f => f.itag === 774 || f._origItag === 774);
+      const advertised774 = merged.filter(f => f.itag === 774 || f._origItag === 774);
+      const completeTvContext = Boolean(tvCtx?.serverAbrStreamingUrl && tvCtx?.ustreamerConfig);
+      const only774 = IS_FIREFOX ? advertised774.filter(f => f.url || f._directUrl || completeTvContext) : advertised774;
       const has774 = only774.length > 0;
+      const supplyError = error || (IS_FIREFOX && !has774 && (
+        advertised774.length ? 'UNUSABLE_774' : results.find(r => r.error)?.error || (!results.length ? 'EMPTY_HARVEST' : null)));
       if (has774) {
         confirmedNo774Videos.delete(videoId);
         const resolvedLdb = typeof only774[0]?.loudnessDb === 'number'
@@ -992,10 +1039,19 @@
         // Strip 251 and non-774 audio formats so 251 never goes into the player after fetch
         cacheSet(videoId, only774, tvCtx, statsForVideo, resolvedLdb);
         failedFetches.delete(videoId);
-        if (isCurrentWatchVideo(videoId)) {
+        if (ownsCurrentSupply(videoId)) {
           tryUpgradeVideo(videoId, 'FetchComplete');
         }
-      } else if (isCurrentWatchVideo(videoId)) {
+      } else if (IS_FIREFOX && supplyError) {
+        failedFetches.set(videoId, Date.now());
+        if (ownsCurrentSupply(videoId)) {
+          StudioEngine774.stopAndUnmute(`774 supply: ${supplyError}`, videoId);
+          status.activeAudioItag = 251;
+          status.activeMethod = 'original';
+          status.fallbackReason = `774 supply: ${supplyError}`;
+          report();
+        }
+      } else if (ownsCurrentSupply(videoId)) {
         failedFetches.set(videoId, Date.now());
         confirmedNo774Videos.add(videoId);
         console.log(TAG, `[HQ] Video ${videoId} has NO 774. Marked as confirmedNo774 (SW and extension will not touch further).`);
@@ -1010,12 +1066,14 @@
         pendingFetches.delete(videoId);
       }
 
-      if (isCurrentWatchVideo(videoId)) {
+      if (ownsCurrentSupply(videoId)) {
         status.clientStats = statsForVideo;
         report();
       }
 
-      return { formats: has774 ? only774 : merged, streamingContext: tvCtx };
+      return { formats: has774 ? only774 : (IS_FIREFOX && supplyError ? [] : merged),
+        streamingContext: IS_FIREFOX && !completeTvContext ? null : tvCtx,
+        ...(IS_FIREFOX && supplyError ? { error: supplyError } : {}) };
     });
 
     pendingFetches.set(videoId, fetchPromise);
@@ -1585,6 +1643,7 @@
 
     status.activeMethod = `Failover to ${targetSource}`;
     status.fallbackReason = `Smart Failover from ${failedSource} (${reason})`;
+    if (IS_FIREFOX) status.activeAudioItag = 251;
     report();
 
     fetchAllHQAudio(videoId, { preferredSource: targetSource, excludeSource: failedSource }).then(hqData => {
@@ -3204,6 +3263,189 @@
     _initialMetaSynced: false,
     _waiterTimer: null,
     _watchdogTimer: null,
+    _healthTimer: null,
+    _healthEvents: [],
+    _healthFault: null,
+    _healthSample: null,
+    _healthSignalZeroAt: 0,
+    _healthSignalChecked: false,
+    _healthLowAt: 0,
+    _healthRequestedAt: 0,
+    _healthRefresh: null,
+    _healthRefreshAt: 0,
+
+    healthNote(kind, detail = {}) {
+      if (!IS_FIREFOX) return;
+      const rec = Object.assign({ t: Date.now(), kind, videoId: this.activeVideoId }, detail);
+      this._healthEvents.push(rec);
+      if (this._healthEvents.length > 240) this._healthEvents.shift();
+      if (kind !== 'sample') {
+        PlaybackArbiter._note('health', kind, detail);
+        ChannelHealth.note('health-' + kind, detail);
+        console.info(TAG, '[774 health]', rec);
+      }
+    },
+
+    startHealthWatchdog() {
+      if (!IS_FIREFOX || this._healthTimer) return;
+      // Independent of the 750 ms drift controller: its quantization/rate band is unchanged.
+      this._healthTimer = setInterval(() => {
+        try { this.checkPlaybackHealth(); } catch (e) {
+          this.healthNote('probe-error', { reason: String(e && e.name || 'unknown') });
+        }
+      }, 250);
+    },
+
+    checkPlaybackHealth() {
+      if (!IS_FIREFOX || !S.enabled || !isPlayerActiveOnPage()) return;
+      const now = Date.now(), video = getMainVideoElement(), audio = this.audio;
+      if (!video || video.paused || video.ended || this._userPaused || this.isAdActive() ||
+          this.isUserMuted() || this.getUserVolume() <= 0 || this.hasRecentUserSeekIntent() || video.seeking) {
+        this._healthFault = null;
+        this._healthSample = null;
+        this._healthLowAt = 0;
+        this._healthSignalZeroAt = 0;
+        this._healthSignalChecked = false;
+        return;
+      }
+      if (this.isActive && this.activeVideoId && this.navVidNow() !== this.activeVideoId) {
+        this.healthNote('stale-source', { navVid: this.navVidNow() });
+        this.prepareTransition(this.navVidNow());
+        return;
+      }
+      if (!this.isActive && Number(status.activeAudioItag) !== 774) return;
+      if (this._trackEnded && video.duration - video.currentTime < 1) return;
+
+      let ahead = 0;
+      try {
+        const b = audio && audio.buffered;
+        for (let i = 0; b && i < b.length; i++) {
+          if (video.currentTime >= b.start(i) - 0.05 && video.currentTime < b.end(i)) {
+            ahead = b.end(i) - video.currentTime;
+            break;
+          }
+        }
+      } catch (e) {}
+      const supply = this.best774Candidate?._isUmpMse && typeof UmpMseController774.getSourceHealth === 'function'
+        ? UmpMseController774.getSourceHealth(this.activeVideoId) : null;
+      const prev = this._healthSample;
+      const sample = {
+        t: now, videoTime: video.currentTime, audioTime: audio ? audio.currentTime : null,
+        aheadSec: Math.round(ahead * 1000) / 1000,
+        consumptionRate: Number(video.playbackRate) || 1,
+        responseLatencyMs: supply ? supply.responseLatencyMs : null,
+        requestAgeMs: supply ? supply.requestAgeMs : null,
+        supplyState: supply ? supply.state : null,
+        supplyReason: supply ? supply.reason : null,
+        supplyFailures: supply ? supply.failures : null,
+        lastSupplyProgressAt: supply ? supply.lastProgressAt : null,
+      };
+      // Preserve progress time across seeks/reconnects; setting currentTime is not proof of decoding.
+      if (!prev || prev.videoId !== this.activeVideoId) {
+        sample.audioAdvanceAt = now;
+        sample.videoAdvanceAt = now;
+      } else {
+        sample.audioAdvanceAt = audio && audio.readyState >= 2 && !audio.paused &&
+          !audio.seeking && !this._isAudioBuffering && audio.currentTime > prev.audioTime + 0.02
+          ? now : prev.audioAdvanceAt;
+        sample.videoAdvanceAt = video.currentTime > prev.videoTime + 0.02 ? now : prev.videoAdvanceAt;
+      }
+      sample.videoId = this.activeVideoId;
+      this._healthSample = sample;
+      this.healthNote('sample', sample);
+
+      const latencySec = Math.max(0, Number(supply?.responseLatencyMs) || 0) / 1000;
+      const threshold = Math.max(3, Math.min(12, (latencySec + 2) * sample.consumptionRate + 1));
+      const declining = prev && ahead < prev.aheadSec - 0.02;
+      const nearEnd = video.duration > 0 && video.duration - video.currentTime <= threshold + 0.5;
+      if (ahead < threshold && declining && !nearEnd) {
+        if (!this._healthLowAt) this._healthLowAt = now;
+        if (now - this._healthLowAt >= 500 && now - this._healthRequestedAt >= 750) {
+          this._healthRequestedAt = now;
+          this.healthNote('buffer-risk', { aheadSec: sample.aheadSec, decreasingForMs: now - this._healthLowAt, responseLatencyMs: sample.responseLatencyMs });
+          if (supply && typeof UmpMseController774.requestSupply === 'function') UmpMseController774.requestSupply('buffer-risk');
+          else if (S.hqFetch && !this._healthRefresh && now - this._healthRefreshAt >= 10000) {
+            // Keep the direct browser buffer audible while a fresh YTM URL (or HYBRID
+            // alternate) is acquired. Do not repeatedly restart the in-flight harvest.
+            this._healthRefreshAt = now;
+            const vid = this.activeVideoId;
+            const opts = { forceFresh: true };
+            if (S.operationMode === OP_MODES.HYBRID_HQ) {
+              opts.preferredSource = 'TVHTML5'; opts.excludeSource = 'YTM_HARVESTER';
+            }
+            const refresh = fetchAllHQAudio(vid, opts);
+            this._healthRefresh = refresh;
+            refresh.catch(() => {}).finally(() => {
+              if (this._healthRefresh === refresh) this._healthRefresh = null;
+            });
+          }
+        }
+      } else if (!declining || ahead >= threshold || nearEnd) this._healthLowAt = 0;
+
+      const signal = typeof ChannelHealth.signal === 'function' ? ChannelHealth.signal() : null;
+      if (signal?.silent && audio && signal.src === (audio.currentSrc || audio.src)) {
+        if (!this._healthSignalZeroAt) this._healthSignalZeroAt = now;
+        if (now - this._healthSignalZeroAt >= 2000 && !this._healthSignalChecked) {
+          this._healthSignalChecked = true;
+          this.healthNote('rms-zero-diagnosis', { heldMs: now - this._healthSignalZeroAt,
+            lastEngineEvents: PlaybackArbiter.transitions.filter(e => e.kind !== 'health').slice(-8) });
+          // Re-attach the independent read-only tap and repair output volume first. RMS
+          // alone also describes digital silence in the recording; do not discard a healthy
+          // advancing stream merely because its content is quiet.
+          ChannelHealth.release();
+          ChannelHealth.attach(audio);
+          this.syncVol(video);
+        }
+      } else if (signal && !signal.silent) { this._healthSignalZeroAt = 0; this._healthSignalChecked = false; }
+
+      let reason = null;
+      if (!this.isActive) reason = 'detached-with-774-status';
+      else if (!audio || !audio.src || audio.isConnected === false) reason = 'audio-detached';
+      else if (audio.error) reason = 'media-error';
+      else if (audio.muted || audio.volume <= 0.001) reason = 'unexpected-output-mute';
+      else if (audio.paused) reason = 'unexpected-pause';
+      else if (audio.ended && !nearEnd) reason = 'early-audio-ended';
+      else if (supply && (supply.pumpStopped || supply.state === 'failed' || supply.state === 'stopped' || supply.state === 'fallback') && !nearEnd) reason = 'pump-stopped';
+      else if (now - sample.videoAdvanceAt < 750 && now - sample.audioAdvanceAt >= 500 && !nearEnd) reason = 'audio-clock-stalled';
+
+      if (!reason) {
+        if (this._healthFault) this.healthNote('recovered', { reason: this._healthFault.reason, elapsedMs: now - this._healthFault.at });
+        this._healthFault = null;
+        return;
+      }
+      if (!this._healthFault) {
+        this._healthFault = { at: now, reason, repaired: false };
+        this.healthNote('fault', { reason, aheadSec: sample.aheadSec,
+          lastEngineEvents: PlaybackArbiter.transitions.filter(e => e.kind !== 'health').slice(-8) });
+      }
+      const fault = this._healthFault;
+      // The deadline is tied to the original outage, never to a new src/play/seek event.
+      if (now - fault.at >= 1250) {
+        this.healthNote('fallback', { reason: fault.reason, elapsedMs: now - fault.at });
+        // Prevent the 350 ms upgrade tick from immediately reattaching the same dead
+        // cached source and repeating the outage. A fresh acquisition can clear backoff.
+        if (this.activeVideoId) {
+          hqCache.delete(this.activeVideoId);
+          failedFetches.set(this.activeVideoId, now);
+          try { window.sessionStorage.removeItem(CACHE_PREFIX + this.activeVideoId); } catch (e) {}
+        }
+        this.stopAndUnmute(`774 recovery deadline: ${fault.reason}`);
+        return;
+      }
+      if (!fault.repaired) {
+        fault.repaired = true;
+        this.healthNote('repair', { reason, aheadSec: sample.aheadSec });
+        if (reason === 'unexpected-output-mute') {
+          audio.muted = false;
+          this.syncVol(video);
+        } else if (reason === 'unexpected-pause' && !this._isAudioBuffering) {
+          this._tryPlayAudio();
+        } else if (this.isActive && this.best774Candidate) {
+          if (audio?.isConnected === false) (document.body || document.documentElement).appendChild(audio);
+          this._reconnectStream('health:' + reason, video.currentTime);
+        }
+      }
+    },
     // Lever 3 (A-refine-playback): bounded micro playbackRate convergence for
     // 80ms < |audio-video drift| < 300ms. Only the slave <audio> rate is touched;
     // video.currentTime is never written by this path.
@@ -3433,6 +3675,7 @@
 
     init() {
       if (!S.enabled) return;
+      this.startHealthWatchdog();
       if (!this.audio) {
         this.audio = document.createElement('audio');
         this.audio.id = 'ytss-studio-774';
@@ -3465,7 +3708,7 @@
               const delay = 500 * Math.pow(2, this._reconnectAttempts || 0);
               console.log(TAG, `[StudioEngine774] Network/decode hiccup. Auto-reconnecting in ${delay}ms (${(this._reconnectAttempts || 0) + 1}/3, error code: ${err?.code})...`);
               setTimeout(() => {
-                if (this.isActive) this._reconnectStream('Media error recovery');
+                if (this.isActive && (!IS_FIREFOX || (this.activeVideoId === currentVid && this.navVidNow() === currentVid))) this._reconnectStream('Media error recovery');
               }, delay);
               return;
             }
@@ -3760,6 +4003,7 @@
 
     _silenceElement(el) {
       if (!S.enabled || !el || el === this.audio || (!this.isActive && !this._isTransitioning) || this.isAdActive()) return;
+      if (IS_FIREFOX && !this.isActive) return;
       this.hookVideoVolume(el);
       try {
         if (descVolume.get.call(el) !== 0) {
@@ -4787,6 +5031,12 @@
       status.activeAudioItag = 251;
       status.activeMethod = 'original';
       status.fallbackReason = 'Video transition';
+      if (IS_FIREFOX) {
+        // Native audio is the bridge while the next owned 774 source is acquired.
+        this.restoreNativeVideo(getMainVideoElement());
+        ChannelHealth.release();
+        report();
+      }
       if (typeof PlayerBadgeUI !== 'undefined') PlayerBadgeUI.update();
       if (this.pending774 && this.pending774.videoId !== newVid) {
         this.pending774 = null;
@@ -4815,7 +5065,7 @@
           console.log(TAG, `[StudioEngine774] Transition safety timeout for ${newVid} -> restoring native audio`);
           this.stopAndUnmute('Transition timeout fallback', newVid);
         }
-      }, 6000);
+      }, IS_FIREFOX ? 1800 : 6000);
       if (this.audio) {
         PlaybackArbiter.pauseAudio('prepareTransition');
         try {
@@ -5126,10 +5376,11 @@
       }
     },
 
-    _reconnectStream(reason = '') {
+    _reconnectStream(reason = '', masterTime = null) {
       if (!this.isActive || !this.best774Candidate) return;
       const video = getMainVideoElement();
-      const targetTime = (this.audio && this.audio.currentTime > 0) ? this.audio.currentTime : (video ? getVideoTimeFor(this.activeVideoId) : 0);
+      const targetTime = IS_FIREFOX && Number.isFinite(masterTime) ? Math.max(0, masterTime)
+        : (this.audio && this.audio.currentTime > 0) ? this.audio.currentTime : (video ? getVideoTimeFor(this.activeVideoId) : 0);
       if (this.best774Candidate._isUmpMse && UmpMseController774.isActive) {
         UmpMseController774.onSeek(targetTime, { userSeek: false });
         return;
@@ -5658,6 +5909,13 @@
 
       confirmedNo774Videos.delete(videoId);
       this.pending774 = null;
+      if (IS_FIREFOX && this.activeVideoId !== videoId) {
+        this._healthFault = null;
+        this._healthSample = null;
+        this._healthSignalZeroAt = 0;
+        this._healthSignalChecked = false;
+        this._healthLowAt = 0;
+      }
       this.activeVideoId = videoId;
       this.best774Candidate = best774;
       this._isTransitioning = false;
@@ -5802,6 +6060,15 @@
     },
 
     stopAndUnmute(reason = '', preserveVideoId = null) {
+      if (IS_FIREFOX) {
+        this._healthFault = null;
+        this._healthSample = null;
+        ChannelHealth.release();
+        if (!S.enabled && this._healthTimer) {
+          clearInterval(this._healthTimer);
+          this._healthTimer = null;
+        }
+      }
       this._rateCorrection = 1.0;
       this._rateCorrectionUntil = 0;
       const vId = preserveVideoId || this.activeVideoId || getVideoIdFromUrl();
@@ -5814,6 +6081,16 @@
       const forceDisableCleanup = !S.enabled || reason === 'Extension Disabled';
       PlaybackArbiter.detach(reason || 'stopAndUnmute');
       if (!forceDisableCleanup && !this.isActive && !this._isTransitioning && !this.pending774) {
+        if (IS_FIREFOX && reason) {
+          // A stopped pump can reach this branch after it has already detached. Status
+          // must still stop claiming 774 and the master must regain its output volume.
+          this.restoreNativeVideo(getMainVideoElement());
+          status.activeAudioItag = 251;
+          status.activeMethod = 'original';
+          status.fallbackReason = reason;
+          report();
+          if (typeof PlayerBadgeUI !== 'undefined') PlayerBadgeUI.update();
+        }
         return; // Already cleanly running native; do not disrupt video!
       }
       const wasActive = this.isActive || this._isTransitioning || forceDisableCleanup;
@@ -5891,6 +6168,13 @@
       }
     }
   };
+
+  if (IS_FIREFOX) {
+    window.__ytssSupplyHealth = {
+      snapshot: () => StudioEngine774._healthSample,
+      dump: () => JSON.stringify(StudioEngine774._healthEvents, null, 1),
+    };
+  }
 
   function upgradePlayerToNative774(videoId, best774) {
     return StudioEngine774.load774(videoId, best774);
@@ -6101,9 +6385,19 @@
     report();
     fetchAllHQAudio(videoId, opts).then(hqData => {
       if (!S.enabled || hqData?.superseded) return;
+      if (IS_FIREFOX && getVideoIdFromUrl() && getVideoIdFromUrl() !== videoId && NextVideoManager.nextVideoId !== videoId) return;
       if (hqData?.cancelled) {
         if (isCurrentWatchVideo(videoId) && !pendingFetches.has(videoId) && StudioEngine774._isTransitioning && !StudioEngine774.isActive) {
           StudioEngine774.stopAndUnmute('Harvest cancelled or timed out', videoId);
+        }
+        return;
+      }
+      if (IS_FIREFOX && (hqData?.supplyStatus || hqData?.error) && !hqData?.formats?.length && !hqData?.streamingContext) {
+        // Acquisition/backoff failure is not proof that the video lacks Premium audio.
+        // fetchAllHQAudio already restored/indicated native on the owning current page.
+        if (isCurrentWatchVideo(videoId)) {
+          status.prewarmStatus = `774 supply: ${hqData.supplyStatus?.code || hqData.error}`;
+          report();
         }
         return;
       }
