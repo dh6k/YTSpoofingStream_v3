@@ -23,18 +23,31 @@
 
   const TAG = '[YTM-Harvester]';
   const urlVid = new URLSearchParams(location.search).get('v');
+  const isFirefox = /Firefox\//.test(navigator.userAgent);
+  const sessionId = isFirefox ? new URLSearchParams(String(location.hash || '').slice(1)).get('ytss_harvest') : null;
+  if (isFirefox && !/^\d+\.\d+$/.test(sessionId || '')) return;
   console.log(TAG, `Active inside YTM harvester frame. Target videoId: ${urlVid}, URL: ${location.href}`);
 
   let isAborted = false;
+  let harvestDeadline = null;
+  let pollInterval = null;
+
+  function notifyProgress(stage) {
+    if (!isFirefox || isAborted) return;
+    try { window.parent.postMessage({ type: 'HARVEST_PROGRESS', videoId: urlVid, sessionId, stage }, PARENT_ORIGIN); } catch (e) {}
+  }
+  notifyProgress('FRAME_READY');
 
   function notifyAbort(reason) {
     if (isAborted) return;
     isAborted = true;
+    if (isFirefox) { clearInterval(pollInterval); clearTimeout(harvestDeadline); }
     console.log(TAG, `[ABORT] Harvest aborted for ${urlVid}: ${reason}`);
     try {
       window.parent.postMessage({
         type: 'HARVEST_ABORT',
         videoId: urlVid,
+        ...(isFirefox ? { sessionId } : {}),
         reason
       }, PARENT_ORIGIN);
     } catch (e) {}
@@ -75,6 +88,7 @@
         audioSampleRate: target774.audioSampleRate,
         loudnessDb: trackLoudnessDb
       };
+      notifyProgress('PLAYER_774');
       // Strip serverAbrStreamingUrl so YTM player uses direct HTTP GET with deciphered n + pot and itag=774 in URL
       delete json.streamingData.serverAbrStreamingUrl;
       // Keep only 774 for audio, stripping all lower formats (251, 250, 249, 140, 141)
@@ -96,7 +110,7 @@
     if (json.playabilityStatus?.status && json.playabilityStatus.status !== 'OK') {
       const reason = json.playabilityStatus.reason || json.playabilityStatus.status;
       console.log(TAG, `Track ${urlVid} is UNPLAYABLE on YTM (${reason}). Cancelling.`);
-      notifyAbort(`UNPLAYABLE: ${reason}`);
+      notifyAbort(isFirefox ? (/LOGIN_REQUIRED|AUTH_REQUIRED/.test(json.playabilityStatus.status) ? 'SESSION_EXPIRED' : 'MEDIA_UNAVAILABLE') : `UNPLAYABLE: ${reason}`);
       return false;
     }
 
@@ -197,6 +211,7 @@
 
     isAborted = true;
     clearInterval(pollInterval);
+    if (isFirefox) clearTimeout(harvestDeadline);
     haltPlayback();
 
     const cleanUrl = cleanStreamUrl(streamUrl);
@@ -205,6 +220,7 @@
       window.parent.postMessage({
         type: 'HARVEST_774_URL',
         videoId: urlVid,
+        ...(isFirefox ? { sessionId } : {}),
         url: cleanUrl,
         bitrate: cached774Metadata?.bitrate,
         averageBitrate: cached774Metadata?.averageBitrate,
@@ -400,15 +416,29 @@
     }
   }
 
-  const pollInterval = setInterval(() => {
+  pollInterval = setInterval(() => {
     if (isAborted) {
       clearInterval(pollInterval);
       return;
     }
     autoPlayMuted();
   }, 250);
-  setTimeout(() => {
+  harvestDeadline = setTimeout(() => {
     clearInterval(pollInterval);
-    if (!isAborted) haltPlayback();
-  }, 8000);
+    if (!isAborted) {
+      if (isFirefox) notifyAbort(cached774Metadata ? 'DECIPHER_FAILED' : 'HARVEST_TIMEOUT');
+      else haltPlayback();
+    }
+  }, isFirefox ? 1700 : 8000);
+
+  if (isFirefox) {
+    // A new base.js/CSP failure is recoverable supply failure, not NO_774.
+    window.addEventListener('error', e => {
+      const src = e.target?.src || e.filename || '';
+      if (/\/s\/player\/|base\.js/.test(src)) notifyAbort('DECIPHER_FAILED');
+    }, true);
+    document.addEventListener('securitypolicyviolation', e => {
+      if (/\/s\/player\/|base\.js/.test(e.blockedURI || '')) notifyAbort('DECIPHER_FAILED');
+    });
+  }
 })();

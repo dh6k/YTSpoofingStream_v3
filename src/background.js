@@ -1124,6 +1124,155 @@ function cleanStreamUrl(rawUrl) {
 let harvestSessionSeq = 0;
 let activeHarvestSession = null;
 let currentHarvestVideoId = null;
+// Firefox's event-page iframe has a different lifecycle from Chrome offscreen.
+// A resolver result always settles within the page-side recovery budget, including
+// host creation, iframe load and validation of the signed media URL.
+const FIREFOX_HARVESTER = typeof navigator !== 'undefined' && /Firefox\//.test(navigator.userAgent);
+const FF_HARVEST_BUDGET_MS = 1800;
+const FF_HARVEST_RETRY_MS = 150;
+const FF_HARVEST_ERRORS = new Set(['FRAME_LOST', 'FRAME_BLOCKED', 'SESSION_EXPIRED', 'DECIPHER_FAILED',
+  'TOKEN_REJECTED', 'URL_EXPIRED', 'MEDIA_UNAVAILABLE', 'HARVEST_TIMEOUT', 'HARVEST_CANCELLED', 'NO_774_STREAM']);
+
+function harvestErrorCode(reason) {
+  if (FF_HARVEST_ERRORS.has(reason)) return reason;
+  if (/^UNPLAYABLE/.test(String(reason || ''))) return 'SESSION_EXPIRED';
+  if (/^TRACK_MISMATCH/.test(String(reason || ''))) return 'MEDIA_UNAVAILABLE';
+  return 'FRAME_LOST';
+}
+
+function harvestSupplyFailure(code, session) {
+  const result = [];
+  result._confirmedNo774 = code === 'NO_774_STREAM';
+  result._cancelled = code === 'HARVEST_CANCELLED';
+  result._supplyStatus = {
+    route: 'YTM_HARVESTER', code, recoverable: !['NO_774_STREAM', 'SESSION_EXPIRED', 'FRAME_BLOCKED', 'HARVEST_CANCELLED'].includes(code),
+    action: code === 'HARVEST_CANCELLED' ? 'cancelled' : 'fallback',
+    attempts: session?.attempt || 0, elapsedMs: Math.min(FF_HARVEST_BUDGET_MS, Date.now() - (session?.startedAt ?? Date.now()))
+  };
+  return result;
+}
+
+function doFirefoxHarvest(videoId) {
+  if (activeHarvestSession) {
+    const old = activeHarvestSession;
+    if (old.finish) old.finish(harvestSupplyFailure('HARVEST_CANCELLED', old));
+    else { old.cancelled = true; old.resolve([]); activeHarvestSession = null; }
+  }
+  return new Promise(resolve => {
+    const session = {
+      sessionId: ++harvestSessionSeq, videoId, targetId: videoId, startedAt: Date.now(),
+      attempt: 0, cancelled: false, stage: 'FRAME_LOADING', timer: null, attemptTimer: null, retryTimer: null, probe: null,
+      owns: () => activeHarvestSession === session && !session.cancelled && currentHarvestVideoId === videoId,
+      finish(formats) {
+        if (session.cancelled) return;
+        const owned = activeHarvestSession === session;
+        session.cancelled = true;
+        clearTimeout(session.timer); clearTimeout(session.attemptTimer); clearTimeout(session.retryTimer);
+        session.probe?.abort();
+        if (owned) {
+          activeHarvestSession = null;
+          HarvesterPlatform.send({ type: 'OFFSCREEN_STOP_HARVEST' }).catch(() => {});
+          scheduleOffscreenClose();
+        }
+        resolve(formats);
+      },
+      fail(reason) {
+        if (!session.owns() || session.retryScheduled) return;
+        const code = harvestErrorCode(reason);
+        clearTimeout(session.attemptTimer);
+        session.probe?.abort(); session.probe = null;
+        const canRetry = session.attempt < 2 && Date.now() + FF_HARVEST_RETRY_MS + 250 < session.startedAt + FF_HARVEST_BUDGET_MS
+          && !['NO_774_STREAM', 'SESSION_EXPIRED', 'FRAME_BLOCKED', 'HARVEST_CANCELLED'].includes(code);
+        if (!canRetry) { session.finish(harvestSupplyFailure(code, session)); return; }
+        // A new iframe obtains current YTM cookies, poToken and base.js together.
+        // Never replay a deciphered URL or token from the failed session.
+        session.retryScheduled = true;
+        session.frameSessionId = null;
+        HarvesterPlatform.send({ type: 'OFFSCREEN_STOP_HARVEST' }).catch(() => {});
+        session.retryTimer = setTimeout(startAttempt, FF_HARVEST_RETRY_MS);
+      },
+      resolve(formats) { session.finish(formats); }
+    };
+    activeHarvestSession = session;
+    session.timer = setTimeout(() => session.finish(harvestSupplyFailure(session.stage === 'PLAYER_774' ? 'DECIPHER_FAILED' : 'HARVEST_TIMEOUT', session)), FF_HARVEST_BUDGET_MS);
+    async function startAttempt() {
+      if (!session.owns()) return;
+      session.retryScheduled = false;
+      session.attempt++; session.stage = 'FRAME_LOADING'; session.validating = false;
+      // Correlate same-video retries as well as navigation. Late events from the
+      // old iframe cannot complete the next attempt.
+      session.frameSessionId = `${session.sessionId}.${session.attempt}`;
+      const frameSessionId = session.frameSessionId;
+      // A still-loading healthy iframe keeps the entire acquisition budget.
+      // Reload only after an explicit frame/auth/media failure; a short per-frame
+      // timer would repeatedly destroy cold sessions that can finish within 1.8s.
+      try {
+        await ensureOffscreenDocument();
+        if (!session.owns() || frameSessionId !== session.frameSessionId) return;
+        const ack = await HarvesterPlatform.send({ type: 'OFFSCREEN_HARVEST_YTM', videoId, sessionId: frameSessionId });
+        if (session.owns() && frameSessionId === session.frameSessionId && ack?.success === false) session.fail('FRAME_LOST');
+      } catch (e) {
+        if (session.owns() && frameSessionId === session.frameSessionId) session.fail('FRAME_LOST');
+      }
+    }
+    startAttempt();
+  });
+}
+
+async function acceptFirefoxHarvest(msg) {
+  const session = activeHarvestSession;
+  if (!session?.owns?.() || msg.videoId !== session.videoId || msg.sessionId !== session.frameSessionId || session.validating) return;
+  session.validating = true;
+  const frameSessionId = session.frameSessionId;
+  const probe = new AbortController(); session.probe = probe;
+  const timer = setTimeout(() => probe.abort(), Math.max(1, Math.min(450, session.startedAt + FF_HARVEST_BUDGET_MS - Date.now())));
+  let response;
+  try {
+    if (!isValid774Url(msg.url)) { session.fail('DECIPHER_FAILED'); return; }
+    const url = new URL(cleanStreamUrl(msg.url));
+    if (url.searchParams.has('docid') && url.searchParams.get('docid') !== session.videoId) { session.fail('MEDIA_UNAVAILABLE'); return; }
+    const expires = url.searchParams.get('expire');
+    if (expires !== null && (!Number.isFinite(Number(expires)) || Number(expires) * 1000 <= Date.now() + 30000)) { session.fail('URL_EXPIRED'); return; }
+    url.searchParams.set('range', '0-0');
+    response = await fetch(url.toString(), { headers: { Range: 'bytes=0-0' }, signal: probe.signal });
+    if (!session.owns() || frameSessionId !== session.frameSessionId || session.probe !== probe) return;
+    if (response.status === 401 || response.status === 403) { session.fail('TOKEN_REJECTED'); return; }
+    if (!response.ok) { session.fail('MEDIA_UNAVAILABLE'); return; }
+    // A 200 with no bytes is not a usable stream. Read just the range probe's
+    // first chunk, then cancel; the real element owns all subsequent media I/O.
+    const reader = response.body?.getReader?.();
+    if (!reader) { session.fail('MEDIA_UNAVAILABLE'); return; }
+    let first;
+    try { first = await reader.read(); }
+    finally { try { await reader.cancel(); } catch (e) {} }
+    if (!session.owns() || frameSessionId !== session.frameSessionId || session.probe !== probe) return;
+    if (!first?.value?.byteLength) { session.fail('MEDIA_UNAVAILABLE'); return; }
+    const cleanUrl = cleanStreamUrl(msg.url);
+    let bitrate = Number(msg.averageBitrate || msg.bitrate);
+    if (!bitrate && msg.contentLength && msg.approxDurationMs) bitrate = Math.round(Number(msg.contentLength) * 8000 / Number(msg.approxDurationMs));
+    if (!bitrate && url.searchParams.get('clen') && url.searchParams.get('dur')) bitrate = Math.round(Number(url.searchParams.get('clen')) * 8 / Number(url.searchParams.get('dur')));
+    bitrate = Number.isFinite(bitrate) && bitrate > 0 ? bitrate : 256000;
+    session.finish([{
+      itag: 774, _origItag: 774, url: cleanUrl, _directUrl: cleanUrl,
+      mimeType: 'audio/webm; codecs="opus"', bitrate, averageBitrate: Number(msg.averageBitrate) || bitrate,
+      contentLength: msg.contentLength, approxDurationMs: msg.approxDurationMs,
+      loudnessDb: typeof msg.loudnessDb === 'number' ? msg.loudnessDb : undefined,
+      audioQuality: 'AUDIO_QUALITY_HIGH', _src: 'YTM_HARVESTER'
+    }]);
+  } catch (e) {
+    if (session.owns() && frameSessionId === session.frameSessionId && session.probe === probe) session.fail('MEDIA_UNAVAILABLE');
+  } finally {
+    clearTimeout(timer);
+    try { response?.body?.cancel()?.catch(() => {}); } catch (e) {}
+  }
+}
+
+if (FIREFOX_HARVESTER && chrome.runtime.onSuspend?.addListener) {
+  chrome.runtime.onSuspend.addListener(() => {
+    const session = activeHarvestSession;
+    if (session?.finish) session.finish(harvestSupplyFailure('FRAME_LOST', session));
+  });
+}
 
 if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
   chrome.webRequest.onBeforeRequest.addListener(
@@ -1134,6 +1283,9 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
       // STRICT: ONLY intercept genuine ITAG 774 Opus ~280kbps
       const is774 = url.includes('itag=774') || url.includes('/itag/774');
       if (!is774) return;
+      // Firefox's correlated iframe capture validates the media response before
+      // success. onBeforeRequest cannot know whether poToken/decipher is valid.
+      if (FIREFOX_HARVESTER) return;
 
       // CRITICAL: Only intercept requests originating from offscreen/background harvester document (tabId === -1).
       // Normal browser tabs (such as the active YouTube player tab) have tabId >= 0.
@@ -1231,6 +1383,7 @@ async function harvestViaYtm(videoId, title = null, author = null) {
 }
 
 async function _doHarvest(videoId, title = null, author = null) {
+  if (FIREFOX_HARVESTER) return doFirefoxHarvest(videoId);
   await ensureOffscreenDocument();
 
   // Immediately abort any previous in-flight harvest for an older video
@@ -1318,6 +1471,11 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
   ensureDnrRules();
 
   if (msg.type === 'OFFSCREEN_HARVEST_SUCCESS') {
+    if (FIREFOX_HARVESTER) {
+      if (isFromHarvester(sender)) acceptFirefoxHarvest(msg);
+      sendResponse({ received: isFromHarvester(sender) });
+      return true;
+    }
     if (!isFromHarvester(sender) || !isValid774Url(msg.url)) {
       sendResponse({ received: false });
       return true;
@@ -1375,6 +1533,11 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
       sendResponse({ received: false });
       return true;
     }
+    if (FIREFOX_HARVESTER) {
+      if (activeHarvestSession?.videoId === msg.videoId && activeHarvestSession?.frameSessionId === msg.sessionId) activeHarvestSession.fail(msg.reason);
+      sendResponse({ received: true });
+      return true;
+    }
     if (activeHarvestSession && activeHarvestSession.videoId === msg.videoId) {
       console.log(TAG, `[YTM_HARVEST] Harvest aborted for ${msg.videoId}: ${msg.reason}`);
       const resolve = activeHarvestSession.resolve;
@@ -1387,6 +1550,13 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
       }
       resolve(abortRes);
     }
+    sendResponse({ received: true });
+    return true;
+  }
+
+  if (FIREFOX_HARVESTER && msg.type === 'OFFSCREEN_HARVEST_PROGRESS') {
+    if (isFromHarvester(sender) && activeHarvestSession?.videoId === msg.videoId && activeHarvestSession.frameSessionId === msg.sessionId
+      && ['FRAME_READY', 'PLAYER_774'].includes(msg.stage)) activeHarvestSession.stage = msg.stage;
     sendResponse({ received: true });
     return true;
   }
@@ -1500,11 +1670,13 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
 
         let wasCancelled = false;
         let wasTimedOut = false;
+        let ytmSupplyStatus = null;
 
         const tryYtm = async () => {
           console.log(TAG, `[FETCH_HQ] [Hybrid] Hunting for 774 via YTM Harvester on ${videoId}...`);
           try {
             const ytmFormats = await harvestViaYtm(videoId, title, author);
+            if (FIREFOX_HARVESTER) ytmSupplyStatus = ytmFormats?._supplyStatus || null;
             if (ytmFormats?._cancelled) wasCancelled = true;
             if (ytmFormats?._timedOut) wasTimedOut = true;
             if (ytmFormats && ytmFormats.length > 0 && ytmFormats.some(f => f.itag === 774)) {
@@ -1589,6 +1761,15 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
           return;
         }
 
+        if (FIREFOX_HARVESTER && ytmSupplyStatus && !wasCancelled) {
+          // A provider/session failure is not evidence that this track has no
+          // Premium format. Expose the cause so the page restores native audio
+          // and paints its fallback badge instead of suppressing future probes.
+          sendResponse({ success: false, results: [], error: ytmSupplyStatus.code,
+            supplyStatus: ytmSupplyStatus, confirmedNo774: false, cancelled: false, opMode: 'HYBRID_HQ' });
+          return;
+        }
+
         if (wasCancelled || wasTimedOut || await isModeStale()) {
           console.log(TAG, `[FETCH_HQ] [Hybrid] Harvest ${wasCancelled ? 'cancelled' : 'timed out / superseded'} for ${videoId} (not marking confirmedNo774).`);
           sendResponse({ success: false, results: [], error: wasCancelled ? 'HARVEST_CANCELLED' : 'HARVEST_TIMEOUT', confirmedNo774: false, cancelled: true, opMode: 'HYBRID_HQ' });
@@ -1614,6 +1795,13 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
             [`hq_${videoId}`]: { videoId, formats, streamingContext: null, ts: Date.now() }
           }).catch(() => {});
           sendResponse({ success: true, results, streamingContext: null, opMode: 'YTM_HARVESTER' });
+          return;
+        }
+        if (FIREFOX_HARVESTER && formats?._supplyStatus) {
+          const supplyStatus = formats._supplyStatus;
+          if (formats._confirmedNo774) confirmedNo774Videos.add(videoId);
+          sendResponse({ success: false, results: [], error: supplyStatus.code, supplyStatus,
+            confirmedNo774: Boolean(formats._confirmedNo774), cancelled: Boolean(formats._cancelled), opMode: 'YTM_HARVESTER' });
           return;
         }
         if (formats?._cancelled || formats?._timedOut || await isModeStale()) {

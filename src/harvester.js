@@ -7,8 +7,13 @@
   'use strict';
 
   const TAG = '[YTSpoofHarvester]';
+  const isFirefox = /Firefox\//.test(navigator.userAgent);
+  let frameWatch = null;
+  let activeFrameSession = null;
 
   function teardownFrame() {
+    clearInterval(frameWatch); frameWatch = null;
+    activeFrameSession = null;
     const iframes = document.querySelectorAll('iframe#harvesterFrame, iframe');
     iframes.forEach(iframe => {
       try {
@@ -58,9 +63,26 @@
     if (!msg) return false;
     if (msg.type === 'OFFSCREEN_HARVEST_YTM') {
       const { videoId } = msg;
+      if (isFirefox && (!/^[\w-]{11}$/.test(videoId || '') || !/^\d+\.\d+$/.test(msg.sessionId || ''))) {
+        if (sendResponse) sendResponse({ success: false });
+        return true;
+      }
       const iframe = createFrame();
+      if (isFirefox) {
+        activeFrameSession = { videoId, sessionId: msg.sessionId, iframe };
+        const session = activeFrameSession;
+        const abort = reason => {
+          if (activeFrameSession !== session) return;
+          teardownFrame();
+          emitToBackground({ type: 'OFFSCREEN_HARVEST_ABORT', videoId, sessionId: session.sessionId, reason });
+        };
+        iframe.addEventListener('error', () => abort('FRAME_BLOCKED'), { once: true });
+        frameWatch = setInterval(() => {
+          if (!iframe.isConnected || document.getElementById('harvesterFrame') !== iframe) abort('FRAME_LOST');
+        }, 200);
+      }
       console.log(TAG, `Loading clean YTM harvest session for ${videoId}...`);
-      iframe.src = `https://music.youtube.com/watch?v=${videoId}`;
+      iframe.src = `https://music.youtube.com/watch?v=${videoId}${isFirefox ? '#ytss_harvest=' + msg.sessionId : ''}`;
       if (sendResponse) sendResponse({ success: true });
       return true;
     }
@@ -88,12 +110,19 @@
     // Only trust messages from our own harvester iframe running music.youtube.com.
     const frame = document.getElementById('harvesterFrame');
     if (e.origin !== 'https://music.youtube.com' || !frame || e.source !== frame.contentWindow) return;
+    if (isFirefox && (e.data?.sessionId !== activeFrameSession?.sessionId || e.data?.videoId !== activeFrameSession?.videoId)) return;
+
+    if (isFirefox && e.data?.type === 'HARVEST_PROGRESS') {
+      emitToBackground({ type: 'OFFSCREEN_HARVEST_PROGRESS', videoId: e.data.videoId, sessionId: e.data.sessionId, stage: e.data.stage });
+      return;
+    }
 
     if (e.data?.type === 'HARVEST_774_URL') {
       console.log(TAG, `Iframe captured authentic 774 stream for ${e.data.videoId}`);
       teardownFrame();
       emitToBackground({
         type: 'OFFSCREEN_HARVEST_SUCCESS',
+        ...(isFirefox ? { sessionId: e.data.sessionId } : {}),
         videoId: e.data.videoId,
         url: e.data.url,
         bitrate: e.data.bitrate,
@@ -110,11 +139,19 @@
       teardownFrame();
       emitToBackground({
         type: 'OFFSCREEN_HARVEST_ABORT',
+        ...(isFirefox ? { sessionId: e.data.sessionId } : {}),
         videoId: e.data.videoId,
         reason: e.data.reason
       });
       return;
     }
+  });
+
+  if (isFirefox) document.addEventListener('securitypolicyviolation', e => {
+    if (!activeFrameSession || !String(e.blockedURI || '').includes('music.youtube.com') || !/frame-src|child-src|frame-ancestors/.test(e.effectiveDirective || '')) return;
+    const session = activeFrameSession;
+    teardownFrame();
+    emitToBackground({ type: 'OFFSCREEN_HARVEST_ABORT', videoId: session.videoId, sessionId: session.sessionId, reason: 'FRAME_BLOCKED' });
   });
 
   window.__ytssLocalHarvester = {
