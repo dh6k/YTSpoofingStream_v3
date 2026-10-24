@@ -3269,7 +3269,6 @@
     _healthSample: null,
     _healthSignalZeroAt: 0,
     _healthSignalChecked: false,
-    _healthRepairAt: 0,
     _healthLowAt: 0,
     _healthRequestedAt: 0,
     _healthRefresh: null,
@@ -3307,7 +3306,6 @@
         this._healthLowAt = 0;
         this._healthSignalZeroAt = 0;
         this._healthSignalChecked = false;
-        this._healthRepairAt = 0;
         return;
       }
       if (this.isActive && this.activeVideoId && this.navVidNow() !== this.activeVideoId) {
@@ -3387,26 +3385,10 @@
       const signal = typeof ChannelHealth.signal === 'function' ? ChannelHealth.signal() : null;
       if (signal?.silent && audio && signal.src === (audio.currentSrc || audio.src)) {
         if (!this._healthSignalZeroAt) this._healthSignalZeroAt = now;
-        const recentRepair = this._healthRepairAt && (now - this._healthRepairAt) < 8000 && this._healthSignalZeroAt >= this._healthRepairAt;
-        const zeroThreshold = recentRepair ? 1000 : 2000;
-        if (now - this._healthSignalZeroAt >= zeroThreshold && !this._healthSignalChecked) {
+        if (now - this._healthSignalZeroAt >= 2000 && !this._healthSignalChecked) {
           this._healthSignalChecked = true;
-          this.healthNote('rms-zero-diagnosis', { heldMs: now - this._healthSignalZeroAt, recentRepair,
+          this.healthNote('rms-zero-diagnosis', { heldMs: now - this._healthSignalZeroAt,
             lastEngineEvents: PlaybackArbiter.transitions.filter(e => e.kind !== 'health').slice(-8) });
-          if (recentRepair) {
-            // A repair just ran but the stream still decodes to silence: the source is
-            // dead, not merely quiet. Fall back to native instead of trusting the clock.
-            this.healthNote('fallback', { reason: 'rms-zero-after-repair', elapsedMs: now - (this._healthFault ? this._healthFault.at : now) });
-            if (this.activeVideoId) {
-              hqCache.delete(this.activeVideoId);
-              failedFetches.set(this.activeVideoId, now);
-              try { window.sessionStorage.removeItem(CACHE_PREFIX + this.activeVideoId); } catch (e) {}
-            }
-            this._healthFault = null;
-            this._healthRepairAt = 0;
-            this.stopAndUnmute('774 recovery deadline: rms-zero-after-repair');
-            return;
-          }
           // Re-attach the independent read-only tap and repair output volume first. RMS
           // alone also describes digital silence in the recording; do not discard a healthy
           // advancing stream merely because its content is quiet.
@@ -3447,13 +3429,11 @@
           failedFetches.set(this.activeVideoId, now);
           try { window.sessionStorage.removeItem(CACHE_PREFIX + this.activeVideoId); } catch (e) {}
         }
-        this._healthRepairAt = 0;
         this.stopAndUnmute(`774 recovery deadline: ${fault.reason}`);
         return;
       }
       if (!fault.repaired) {
         fault.repaired = true;
-        this._healthRepairAt = now;
         this.healthNote('repair', { reason, aheadSec: sample.aheadSec });
         if (reason === 'unexpected-output-mute') {
           audio.muted = false;
