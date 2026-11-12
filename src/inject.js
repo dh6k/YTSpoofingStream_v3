@@ -807,6 +807,10 @@
   function ownsCurrentSupply(videoId) {
     if (!IS_FIREFOX) return isCurrentWatchVideo(videoId);
     if (!isCurrentWatchVideo(videoId)) return false;
+    if (navTargetVideoId && navTargetVideoId === videoId) return true;
+    if (typeof StudioEngine774 !== 'undefined' && StudioEngine774._isTransitioning && StudioEngine774._transitionTargetVid === videoId) {
+      return true;
+    }
     const urlVid = getVideoIdFromUrl();
     const playerVid = document.getElementById('movie_player')?.getVideoData?.()?.video_id;
     return (!urlVid || urlVid === videoId) && (!playerVid || playerVid === videoId);
@@ -1277,11 +1281,11 @@
           if (!isMainVideo) {
             return descVolume.get.call(this);
           }
-          if (typeof StudioEngine774 !== 'undefined' && StudioEngine774.isActive) {
-            if (typeof this._userVol === 'number' && !isNaN(this._userVol)) {
+          if (typeof StudioEngine774 !== 'undefined' && (StudioEngine774.isActive || this._ytssSilenced || (descVolume.get.call(this) === 0 && !StudioEngine774._userMuted))) {
+            if (typeof this._userVol === 'number' && !isNaN(this._userVol) && this._userVol > 0) {
               return this._userVol;
             }
-            return (typeof StudioEngine774._userVol === 'number' && !isNaN(StudioEngine774._userVol))
+            return (typeof StudioEngine774._userVol === 'number' && !isNaN(StudioEngine774._userVol) && StudioEngine774._userVol > 0)
               ? StudioEngine774._userVol
               : (readStoredYoutubeVolumeState().volume || 1.0);
           }
@@ -1310,10 +1314,15 @@
           }
           const numV = (typeof v === 'number' && !isNaN(v)) ? Math.max(0, Math.min(1.0, v)) : 1.0;
           if (typeof StudioEngine774 !== 'undefined') {
+            if (numV <= 0 && !StudioEngine774.hasRecentUserMuteOrVolIntent()) {
+              if (StudioEngine774.isActive && !StudioEngine774.isAdActive() && typeof StudioEngine774._silenceElement === 'function') {
+                StudioEngine774._silenceElement(this);
+              }
+              return;
+            }
             const userVol = typeof StudioEngine774.resolveRawUserVolume === 'function'
               ? StudioEngine774.resolveRawUserVolume(numV)
               : numV;
-            StudioEngine774._lastUserMuteOrVolIntentAt = Date.now();
             this._userVol = userVol;
             StudioEngine774._userVol = userVol;
             if (numV > 0) {
@@ -1332,6 +1341,7 @@
                 StudioEngine774.syncVolDirect(userVol);
               }
             } else {
+              this._ytssSilenced = false;
               try { descVolume.set.call(this, numV); } catch (e) {}
             }
           } else {
@@ -1390,17 +1400,10 @@
           let targetMuted = !!m;
           if (typeof StudioEngine774 !== 'undefined') {
             if (targetMuted && !StudioEngine774.hasRecentUserMuteOrVolIntent()) {
-              const p = document.getElementById('movie_player');
-              const pMuted = (p && typeof p.isMuted === 'function') ? p.isMuted() : false;
-              if (!pMuted) {
-                targetMuted = false;
-              }
+              targetMuted = Boolean(StudioEngine774._userMuted);
             }
             this._userMuted = targetMuted;
             StudioEngine774._userMuted = targetMuted;
-            if (targetMuted) {
-              StudioEngine774._lastUserMuteOrVolIntentAt = Date.now();
-            }
             if (StudioEngine774.isActive && !StudioEngine774.isAdActive()) {
               if (typeof StudioEngine774._silenceElement === 'function') {
                 StudioEngine774._silenceElement(this);
@@ -2856,7 +2859,8 @@
         // exhausted SABR context. Fresh supply or the bounded cooldown permits retry.
         return false;
       }
-      const isEngineHolding = (StudioEngine774.isActive && StudioEngine774.activeVideoId === videoId) ||
+      const isEngineHolding = (StudioEngine774.isActive && StudioEngine774.activeVideoId === videoId &&
+                               StudioEngine774.audio && this.session?.blobUrl && StudioEngine774.audio.src === this.session.blobUrl) ||
                               (StudioEngine774.pending774 && StudioEngine774.pending774.videoId === videoId);
       if (this.isActive && this.videoId === videoId && this.session && !this.session.aborted && isEngineHolding) {
         return true;
@@ -3614,12 +3618,38 @@
     // track before getVideoData() catches up (and the URL can update first on SPA autoplay).
     // Returns activeVideoId when both surfaces still agree, so callers can compare directly.
     navVidNow() {
+      if (this._isTransitioning && this._transitionTargetVid && VIDEO_ID_RE.test(this._transitionTargetVid)) {
+        return this._transitionTargetVid;
+      }
       const cur = this.activeVideoId;
       let pv = null;
       try { pv = document.getElementById('movie_player')?.getVideoData?.()?.video_id || null; } catch (e) {}
       const uv = (typeof getVideoIdFromUrl === 'function') ? getVideoIdFromUrl() : null;
-      if (pv && VIDEO_ID_RE.test(pv) && pv !== cur) return pv;
-      if (uv && VIDEO_ID_RE.test(uv)) return uv;
+      const nav = (typeof navTargetVideoId === 'string' && VIDEO_ID_RE.test(navTargetVideoId)) ? navTargetVideoId : null;
+      const outgoing = (this._outgoingVideoId && Date.now() < (this._outgoingUntil || 0)) ? this._outgoingVideoId : null;
+      if (pv && pv === cur && outgoing === pv) {
+        this._outgoingVideoId = null;
+        this._outgoingUntil = 0;
+      }
+      // If StudioEngine774 is already attached to `cur` (which matches `nav` or `uv`),
+      // do not let a lagging `pv` (still holding the outgoing track's video_id) masquerade as a new navigation target!
+      const pvIsLaggingOutgoing = Boolean(
+        pv && cur && pv !== cur && (
+          pv === outgoing ||
+          (nav && cur === nav && pv !== nav) ||
+          (uv && cur === uv && pv !== uv)
+        )
+      );
+      if (pv && VIDEO_ID_RE.test(pv) && pv !== cur && !pvIsLaggingOutgoing) return pv;
+      const uvIsLaggingOutgoing = Boolean(
+        uv && cur && uv !== cur && (
+          uv === outgoing ||
+          (nav && cur === nav && uv !== nav)
+        )
+      );
+      if (uv && VIDEO_ID_RE.test(uv) && !uvIsLaggingOutgoing) return uv;
+      if (cur && VIDEO_ID_RE.test(cur)) return cur;
+      if (nav) return nav;
       return pv || uv || cur;
     },
     // Engine-internal resume: never yank playback after a user/media-key pause.
@@ -3829,6 +3859,10 @@
             this._audioStalledAt = 0;
             console.log(TAG, '[StudioEngine774] Audio buffer replenished. Master clock continues seamlessly.');
           }
+          const video = getMainVideoElement();
+          if (video && !video.paused && !video.ended && this.audio && this.audio.paused && !this._userPaused) {
+            this._tryPlayAudio();
+          }
           // CRITICAL: Never seek this.audio.currentTime = video.currentTime here!
           // Seeking audio on canplay/canplaythrough causes a feedback loop of re-buffering and audio jumps.
         };
@@ -3853,8 +3887,9 @@
             const video = getMainVideoElement();
             if (video) {
               const pState = document.getElementById('movie_player')?.getPlayerState?.();
-              // If user paused video while audio was still buffering/loading, immediately pause audio to prevent sound leak
-              if (video.paused && pState !== 3 && (!document.hidden || this._userPaused || pState === 2 || pState === 0)) {
+              // If user paused video while audio was still buffering/loading, immediately pause audio to prevent sound leak.
+              // Do NOT pause audio during track transition/unstarted state (-1) or playing state (1) when <video> is only momentarily paused!
+              if (video.paused && pState !== 3 && pState !== 1 && (this._userPaused || pState === 2 || pState === 0)) {
                 PlaybackArbiter.pauseAudio('playing-video-paused');
                 return;
               }
@@ -4080,15 +4115,20 @@
     _silenceElement(el) {
       if (!S.enabled || !el || el === this.audio || !this.isActive || this.isAdActive()) return;
       this.hookVideoVolume(el);
+      el._ytssSilenced = true;
       try {
         if (descVolume.get.call(el) !== 0) {
+          el._ytssInternalVolChange = true;
           descVolume.set.call(el, 0);
+          setTimeout(() => { el._ytssInternalVolChange = false; }, 60);
         }
       } catch (e) {}
       try {
         const targetMuted = Boolean(this._userMuted);
         if (descMuted.get.call(el) !== targetMuted) {
+          el._ytssInternalVolChange = true;
           descMuted.set.call(el, targetMuted);
+          setTimeout(() => { el._ytssInternalVolChange = false; }, 60);
         }
       } catch (e) {}
     },
@@ -4110,13 +4150,13 @@
         Object.defineProperty(video, 'volume', {
           get() {
             if (!S.enabled) return descVolume.get.call(this);
-            if (StudioEngine774.isActive) {
-              if (typeof this._userVol === 'number' && !isNaN(this._userVol)) {
+            if (StudioEngine774.isActive || this._ytssSilenced || (descVolume.get.call(this) === 0 && !StudioEngine774._userMuted)) {
+              if (typeof this._userVol === 'number' && !isNaN(this._userVol) && this._userVol > 0) {
                 return this._userVol;
               }
-              return (typeof StudioEngine774._userVol === 'number' && !isNaN(StudioEngine774._userVol))
+              return (typeof StudioEngine774._userVol === 'number' && !isNaN(StudioEngine774._userVol) && StudioEngine774._userVol > 0)
                 ? StudioEngine774._userVol
-                : 1.0;
+                : (readStoredYoutubeVolumeState().volume || 1.0);
             }
             return descVolume.get.call(this);
           },
@@ -4126,8 +4166,13 @@
               return;
             }
             const numV = (typeof v === 'number' && !isNaN(v)) ? Math.max(0, Math.min(1.0, v)) : 1.0;
+            if (numV <= 0 && !StudioEngine774.hasRecentUserMuteOrVolIntent()) {
+              if (StudioEngine774.isActive && !StudioEngine774.isAdActive()) {
+                StudioEngine774._silenceElement(this);
+              }
+              return;
+            }
             const userVol = StudioEngine774.resolveRawUserVolume(numV);
-            StudioEngine774._lastUserMuteOrVolIntentAt = Date.now();
             this._userVol = userVol;
             StudioEngine774._userVol = userVol;
             if (numV > 0) {
@@ -4144,6 +4189,7 @@
                 StudioEngine774.syncVolDirect(userVol);
               }
             } else {
+              this._ytssSilenced = false;
               try { descVolume.set.call(this, numV); } catch (e) {}
             }
           },
@@ -4176,11 +4222,7 @@
               return;
             }
             if (targetMuted && !StudioEngine774.hasRecentUserMuteOrVolIntent()) {
-              const p = document.getElementById('movie_player');
-              const pMuted = (p && typeof p.isMuted === 'function') ? p.isMuted() : false;
-              if (!pMuted) {
-                targetMuted = false;
-              }
+              targetMuted = Boolean(StudioEngine774._userMuted);
             }
             this._userMuted = targetMuted;
             StudioEngine774._userMuted = targetMuted;
@@ -4216,7 +4258,7 @@
       } catch (e) {}
     },
 
-    restoreNativeVideo(video) {
+    restoreNativeVideo(video, opts = {}) {
       const stored = readStoredYoutubeVolumeState();
       const rawUserVol = (typeof this._userVol === 'number' && !isNaN(this._userVol) && this._userVol > 0.05)
         ? this._userVol
@@ -4225,6 +4267,8 @@
 
       const restore = (v) => {
         if (!v || v === this.audio) return;
+        v._ytssSilenced = false;
+        v._ytssInternalVolChange = true;
         delete v._ytssVolHooked;
         delete v.volume;
         delete v.muted;
@@ -4233,6 +4277,7 @@
 
         try { descMuted.set.call(v, isMuted); } catch (e) {}
         try { descVolume.set.call(v, rawUserVol); } catch (e) {}
+        setTimeout(() => { v._ytssInternalVolChange = false; }, 60);
 
         const p = document.getElementById('movie_player');
         if (p) {
@@ -4254,11 +4299,13 @@
         });
       } catch (e) {}
       this._hookedVideos.clear();
-      this._isTransitioning = false;
-      this._transitionTargetVid = null;
-      if (this._transitionSafetyTimer) {
-        clearTimeout(this._transitionSafetyTimer);
-        this._transitionSafetyTimer = null;
+      if (!opts.keepTransition) {
+        this._isTransitioning = false;
+        this._transitionTargetVid = null;
+        if (this._transitionSafetyTimer) {
+          clearTimeout(this._transitionSafetyTimer);
+          this._transitionSafetyTimer = null;
+        }
       }
     },
 
@@ -4371,10 +4418,30 @@
 
         // Guard: if StudioEngine774 is already attached to the new target video while #movie_player
         // is still tearing down the outgoing video, ignore outgoing video's time/seek/pause events!
+        // However, if the <video> element has already re-armed and started playing the new track
+        // before #movie_player.getVideoData() catches up, let play/playing/canplay start 774 audio.
         const activePlayerVid = document.getElementById('movie_player')?.getVideoData?.()?.video_id;
         if (activePlayerVid && this.activeVideoId && activePlayerVid !== this.activeVideoId) {
           if (!isCurrentWatchVideo(this.activeVideoId)) {
             this.prepareTransition(getVideoIdFromUrl());
+            return;
+          }
+          if (e.type === 'volumechange') {
+            if (video._ytssInternalVolChange) {
+              try { e.stopImmediatePropagation(); } catch (err) {}
+            }
+            return;
+          }
+          if ((e.type === 'play' || e.type === 'playing' || e.type === 'loadedmetadata' || e.type === 'canplay') &&
+              !video.paused && !video.ended && (isNaN(video.currentTime) || video.currentTime < 3.0)) {
+            if (!this.isAdActive()) {
+              this._silenceElement(video);
+              this.syncVol(video);
+              this.applyAudioRate(video);
+              if (this.audio.paused && !this._userPaused) {
+                this._tryPlayAudio();
+              }
+            }
           }
           return;
         }
@@ -4478,6 +4545,10 @@
         }
 
         if (e.type === 'volumechange') {
+          if (video._ytssInternalVolChange) {
+            try { e.stopImmediatePropagation(); } catch (err) {}
+            return;
+          }
           if (this._isVolScrubbing || this._inSyncVol) return;
           this.syncVol(video);
           return;
@@ -4745,29 +4816,39 @@
           }
           vol = Math.max(0, Math.min(1.0, vol));
 
-          // Guard against YouTube's spurious auto-mute during track selection / transition
-          if (isMuted && !this._userMuted && !this.hasRecentUserMuteOrVolIntent() && (this._isTransitioning || this.isInTransitionWindow())) {
-            isMuted = false;
-            if (typeof player.unMute === 'function') {
-              try { player.unMute(); } catch (e) {}
+          // Guard against YouTube's spurious auto-mute or zero-volume during track selection / transition
+          if (!this.hasRecentUserMuteOrVolIntent()) {
+            if (isMuted && !this._userMuted) {
+              isMuted = false;
+              if (typeof player.unMute === 'function') {
+                try { player.unMute(); } catch (e) {}
+              }
+            }
+            if (vol <= 0 && !this._userMuted && typeof this._userVol === 'number' && this._userVol > 0) {
+              vol = this._userVol;
+              if (typeof player.setVolume === 'function') {
+                try { player.setVolume(Math.round(vol * 100)); } catch (e) {}
+              }
             }
           }
 
           if (this.hasRecentUserMuteOrVolIntent() || !isMuted) {
             this._userMuted = isMuted;
           }
-          this._userVol = vol;
-          if (vol === 0) {
+          if (vol > 0 || this.hasRecentUserMuteOrVolIntent()) {
+            this._userVol = vol;
+          }
+          if (vol === 0 && this.hasRecentUserMuteOrVolIntent()) {
             this._userMuted = true;
           }
           const mainV = getMainVideoElement();
           if (mainV) {
             mainV._userMuted = this._userMuted;
-            mainV._userVol = vol;
+            mainV._userVol = this._userVol;
           }
 
           if (this.isActive && !this.isAdActive() && this.audio) {
-            if (this._userMuted || vol <= 0) {
+            if (this._userMuted || this._userVol <= 0) {
               this.audio.volume = 0;
             } else {
               this.syncVolDirect(this._userVol);
@@ -4786,7 +4867,8 @@
           const origPlayVideo = typeof player.playVideo === 'function' ? player.playVideo.bind(player) : null;
           player.pauseVideo = (...a) => {
             if (S.enabled) {
-              if (!this.isSeekInProgress() || this._userPaused) {
+              const inTransition = Boolean(this._isTransitioning || this.isInTransitionWindow() || isSpaNavigating);
+              if ((!this.isSeekInProgress() && (!inTransition || pauseGesturePending())) || this._userPaused) {
                 this.lockPause();
               } else {
                 PlaybackArbiter.pauseAudio('player-pauseVideo-hook');
@@ -4889,6 +4971,17 @@
             } else if (S.hqFetch) {
               prewarmCache(newVid);
             }
+          } else if (this.isActive && this.activeVideoId === newVid) {
+            if (this._outgoingVideoId === newVid) {
+              this._outgoingVideoId = null;
+              this._outgoingUntil = 0;
+            }
+            const mainV = getMainVideoElement();
+            if (mainV && !mainV.paused && !mainV.ended && this.audio && this.audio.paused && !this._userPaused && !this.isAdActive()) {
+              this._silenceElement(mainV);
+              this.syncVol(mainV);
+              this._tryPlayAudio();
+            }
           }
         };
 
@@ -4897,12 +4990,13 @@
           if (!S.enabled) return;
           if (state === 2) {
             // YT paused (UI button / space / media session through player)
-            // Ignore state 2 noise during fullscreen transitions or timeline seek/scrub.
+            // Ignore state 2 noise during fullscreen transitions, track transitions, or timeline seek/scrub.
             if (!fsBusy()) {
               const userPauseIntentState2 = pauseGesturePending();
+              const inTransition = Boolean(this._isTransitioning || this.isInTransitionWindow() || isSpaNavigating);
               if (IS_FIREFOX && !userPauseIntentState2 && !this._userPaused && Date.now() < (this._tabReturnGraceUntil || 0)) {
                 this.deferAudioPause();
-              } else if (!this.isSeekInProgress() || this._userPaused) {
+              } else if ((!this.isSeekInProgress() && (!inTransition || userPauseIntentState2)) || this._userPaused) {
                 consumePauseGesture();
                 this.lockPause();
               } else {
@@ -5027,8 +5121,13 @@
         const origSetVol = this._origSetVol;
         player.setVolume = (v) => {
           if (!S.enabled) return origSetVol.call(player, v);
-          this._lastUserMuteOrVolIntentAt = Date.now();
           const numV = (typeof v === 'number' && !isNaN(v)) ? Math.max(0, Math.min(100, v)) : 100;
+          if (numV <= 0 && !this.hasRecentUserMuteOrVolIntent()) {
+            const safeVol = (typeof this._userVol === 'number' && !isNaN(this._userVol) && this._userVol > 0)
+              ? Math.round(this._userVol * 100)
+              : 100;
+            return origSetVol.call(player, safeVol);
+          }
           if (numV > 0) {
             this._userVol = numV / 100;
             this._userMuted = false;
@@ -5062,10 +5161,11 @@
         if (typeof origMute === 'function') {
           player.mute = () => {
             if (!S.enabled) return origMute.call(player);
-            this._lastUserMuteOrVolIntentAt = Date.now();
-            if (!this._userMuted && this.isActive && !this.hasRecentUserMuteOrVolIntent()) {
-              const mainV = getMainVideoElement();
-              if (mainV) this._silenceElement(mainV);
+            if (!this._userMuted && !this.hasRecentUserMuteOrVolIntent()) {
+              if (this.isActive && !this.isAdActive()) {
+                const mainV = getMainVideoElement();
+                if (mainV) this._silenceElement(mainV);
+              }
               return;
             }
             this._userMuted = true;
@@ -5088,7 +5188,6 @@
         if (typeof origUnmute === 'function') {
           player.unMute = () => {
             if (!S.enabled) return origUnmute.call(player);
-            this._lastUserMuteOrVolIntentAt = Date.now();
             this._userMuted = false;
             const mainV = getMainVideoElement();
             if (mainV) mainV._userMuted = false;
@@ -5114,6 +5213,15 @@
         return;
       }
       console.log(TAG, `[StudioEngine774] Preparing transition to: ${newVid}`);
+      let pVid = null;
+      try { pVid = document.getElementById('movie_player')?.getVideoData?.()?.video_id || null; } catch (e) {}
+      const prevVid = (this.activeVideoId && this.activeVideoId !== newVid)
+        ? this.activeVideoId
+        : (pVid && pVid !== newVid ? pVid : null);
+      if (prevVid) {
+        this._outgoingVideoId = prevVid;
+        this._outgoingUntil = Date.now() + 6000;
+      }
       // New video = new playback context. A pause lock from the previous track
       // must not block play() on this one.
       this.unlockPlay();
@@ -5130,9 +5238,9 @@
       status.activeAudioItag = 251;
       status.activeMethod = 'original';
       status.fallbackReason = 'Video transition';
+      // Native audio is the bridge while the next owned 774 source is acquired.
+      this.restoreNativeVideo(getMainVideoElement(), { keepTransition: true });
       if (IS_FIREFOX) {
-        // Native audio is the bridge while the next owned 774 source is acquired.
-        this.restoreNativeVideo(getMainVideoElement());
         ChannelHealth.release();
         report();
       }
@@ -6006,6 +6114,18 @@
 
       confirmedNo774Videos.delete(videoId);
       this.pending774 = null;
+      let pVidNow = null;
+      try { pVidNow = document.getElementById('movie_player')?.getVideoData?.()?.video_id || null; } catch (e) {}
+      const prevActive = (this.activeVideoId && this.activeVideoId !== videoId)
+        ? this.activeVideoId
+        : (pVidNow && pVidNow !== videoId ? pVidNow : null);
+      if (prevActive) {
+        this._outgoingVideoId = prevActive;
+        this._outgoingUntil = Date.now() + 6000;
+      } else if (this._outgoingVideoId === videoId) {
+        this._outgoingVideoId = null;
+        this._outgoingUntil = 0;
+      }
       if (IS_FIREFOX && this.activeVideoId !== videoId) {
         this._healthFault = null;
         this._healthSample = null;
@@ -7140,7 +7260,8 @@
       return; // Ignore stale video from previous track or rapid playlist navigation
     }
     if (confirmedNo774Videos.has(videoId)) return; // Never touch video confirmed as NO 774
-    if (StudioEngine774.isActive && StudioEngine774.activeVideoId === videoId) {
+    if (StudioEngine774.isActive && StudioEngine774.activeVideoId === videoId &&
+        StudioEngine774.audio && StudioEngine774.audio.src && !StudioEngine774.audio.error) {
       return; // Already actively playing 774 for this exact track
     }
 
