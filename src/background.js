@@ -96,6 +96,8 @@ const confirmedNo774Videos = {
   delete(v) { if (currentNo774VideoId === v) currentNo774VideoId = null; },
   clear() { currentNo774VideoId = null; }
 };
+const VALID_LOCALES = new Set(['en', 'vi', 'ja', 'ru', 'zh-cn', 'zh-tw']);
+const localeCache = new Map();
 
 // ─── AUTHENTICATION ──────────────────────────────────────────────────
 // YouTube web derives its Authorization header from up to three cookies, each with
@@ -439,7 +441,7 @@ let _dnrVerified = null;
 // may only ever remove ids listed here (plus the generated per-client ranges and the
 // _ytss_c= marker). Upstream 5468b23 wipes the whole dynamic store; on Firefox that also
 // deletes foreign rules and the fallback rules themselves, so that hunk is NOT ported.
-const FORK_STATIC_RULE_IDS = new Set([9000, 9193, 9195, 9196, 9197, 9198, 9199, 9200, 9201, 9300, 9500, 9501]);
+const FORK_STATIC_RULE_IDS = new Set([101, 9000, 9193, 9195, 9196, 9197, 9198, 9199, 9200, 9201, 9300, 9500, 9501]);
 function isForkOwnedRule(rule) {
   if (!rule || typeof rule.id !== 'number') return false;
   if (FORK_STATIC_RULE_IDS.has(rule.id)) return true;
@@ -1564,6 +1566,34 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
       console.log(TAG, `[CONFIRM_NO_774] Video ${videoId} temporarily marked as NO 774 in SW (ephemeral).`);
     }
     sendResponse({ received: true });
+    return true;
+  }
+
+  if (msg.type === 'GET_LOCALE') {
+    const l = VALID_LOCALES.has(msg.lang) ? msg.lang : 'en';
+    if (localeCache.has(l)) {
+      sendResponse({ success: true, lang: l, strings: localeCache.get(l) });
+      return true;
+    }
+    (async () => {
+      try {
+        let url = chrome.runtime.getURL(`locales/${l}.json`);
+        let res = await fetch(url);
+        if (!res.ok && l !== 'en') {
+          url = chrome.runtime.getURL('locales/en.json');
+          res = await fetch(url);
+        }
+        if (res.ok) {
+          const strings = await res.json();
+          localeCache.set(l, strings);
+          sendResponse({ success: true, lang: l, strings });
+          return;
+        }
+      } catch (err) {
+        void err;
+      }
+      sendResponse({ success: false });
+    })();
     return true;
   }
 
