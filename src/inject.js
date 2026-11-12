@@ -157,7 +157,6 @@
       sabrRewrite.lastModified = null;
       sabrRewrite.verified774 = false;
       sabrRewrite.downgradedVideoId = null;
-      status.downloadUrl = null;
       try {
         for (let i = window.sessionStorage.length - 1; i >= 0; i--) {
           const k = window.sessionStorage.key(i);
@@ -2484,22 +2483,8 @@
               StudioEngine774.stopAndUnmute('TV UMP SabrError');
             }
           } else if (session.hasInit && targetMs > 5000) {
-            // Firefox: a zero-segment response mid-stream is NOT proof of EOF. SABR can answer
-            // with only a NextRequestPolicy part (empty prime / downgrade / transient server
-            // state). Declaring EOF here stopped the pump, the 30s lookahead drained and the
-            // audible <audio> fired 'waiting' (~0.8s silence) before an accidental recovery that
-            // depended on the video clock passing the buffered end. Only stop at the known
-            // duration; otherwise the 250ms timer retries the same target. Chrome is unchanged.
-            if (!IS_FIREFOX) {
-              session.reachedEof = true;
-            } else {
-              const durSec = session.durationSec || (video && video.duration > 0 ? video.duration : 0);
-              session.emptyResponses = (session.emptyResponses || 0) + 1;
-              if ((durSec > 0 && targetMs >= durSec * 1000 - 200) ||
-                  (!(durSec > 0) && session.emptyResponses >= 6)) {
-                session.reachedEof = true;
-              }
-            }
+            // IS_FIREFOX already returned above; on Chromium a zero-segment response past 5s marks EOF.
+            session.reachedEof = true;
           }
           return;
         }
@@ -4032,13 +4017,16 @@
       video._userMuted = Boolean(this._userMuted);
 
       // 1. Intercept volume setter/getter
+      // On Firefox, native <video> audio bridges track transitions (_isTransitioning && !isActive),
+      // so hardware descriptors must only be intercepted once StudioEngine774.isActive is true.
+      const isInterceptingMedia = () => StudioEngine774.isActive || (!IS_FIREFOX && StudioEngine774._isTransitioning);
       try {
         Object.defineProperty(video, 'volume', {
           get() {
             if (!S.enabled) {
               return descVolume.get.call(this);
             }
-            if (StudioEngine774.isActive || StudioEngine774._isTransitioning) {
+            if (isInterceptingMedia()) {
               if (typeof this._userVol === 'number' && !isNaN(this._userVol)) {
                 return this._userVol;
               }
@@ -4066,7 +4054,7 @@
               this._userMuted = true;
               StudioEngine774._userMuted = true;
             }
-            if ((StudioEngine774.isActive || StudioEngine774._isTransitioning) && !StudioEngine774.isAdActive()) {
+            if (isInterceptingMedia() && !StudioEngine774.isAdActive()) {
               StudioEngine774._silenceElement(this);
               if (StudioEngine774.audio && StudioEngine774.isActive) {
                 StudioEngine774.syncVolDirect(userVol);
@@ -4086,7 +4074,7 @@
             if (!S.enabled) {
               return descMuted.get.call(this);
             }
-            if (StudioEngine774.isActive || StudioEngine774._isTransitioning) {
+            if (isInterceptingMedia()) {
               return Boolean(StudioEngine774._userMuted);
             }
             return descMuted.get.call(this);
@@ -4115,7 +4103,7 @@
             }
             this._userMuted = targetMuted;
             StudioEngine774._userMuted = targetMuted;
-            if ((StudioEngine774.isActive || StudioEngine774._isTransitioning) && !StudioEngine774.isAdActive()) {
+            if (isInterceptingMedia() && !StudioEngine774.isAdActive()) {
               StudioEngine774._silenceElement(this);
               if (StudioEngine774.audio && StudioEngine774.isActive) {
                 if (StudioEngine774.isUserMuted()) {
@@ -5304,8 +5292,8 @@
       if (!this.audio.paused && !this.audio.ended) {
         if (video.paused) {
           const drift = this.audio.currentTime - video.currentTime;
-          // Only seek video if Chrome throttled background video significantly (> 0.8s)
-          if (drift > 0.8) {
+          // Snap silent backgrounded <video> forward to audible <audio> on tab return
+          if (drift > (IS_FIREFOX ? 0.35 : 0.8)) {
             this._isInternalVideoSync = true;
             this._isTabResyncing = true;
             PlaybackArbiter.seekPlayer(this.audio.currentTime, 'tab-resync');
@@ -5326,7 +5314,7 @@
           this._silenceElement(video);
         } else {
           const drift = this.audio.currentTime - video.currentTime;
-          if (drift > 1.2) {
+          if (drift > (IS_FIREFOX ? 0.35 : 1.2)) {
             this._isInternalVideoSync = true;
             this._isTabResyncing = true;
             PlaybackArbiter.seekPlayer(this.audio.currentTime, 'tab-resync');
@@ -5528,11 +5516,10 @@
       } else if (smMs < 300 || smMs > 1500) {
         this._startupAlignTicks = 0;
       }
-      // Mid-run band: extended from 300 ms to 450 ms so a post-stall 300-450 ms residual is
-      // converged smoothly by the rate controller instead of sitting in the old dead zone.
-      // Above 450 ms the existing hard audio resync (audio behind) takes over; a snap here
-      // would introduce a deliberate replay, which is itself an audible symptom.
-      const rateBandMaxMs = IS_FIREFOX ? 450 : 300; // Chrome keeps the shipped 300 ms band
+      // Mid-run band: 450 ms when audio is behind (above 450 ms hard slave resync takes over),
+      // and 750 ms on Firefox when audio is ahead (sm > 0) so background-video lag residuals
+      // (450-750 ms) converge smoothly without seeking audible audio. Chrome stays at 300 ms.
+      const rateBandMaxMs = IS_FIREFOX ? (sm > 0 ? 750 : 450) : 300;
       if (smMs > rateBandMaxMs) {
         this._driftSmooth = null;
         this._driftHist = [];
@@ -9095,38 +9082,6 @@
       }
     }
 
-    // ── Download-URL capture (read-only) ──────────────────────────────────
-    if (url.includes('googlevideo.com/videoplayback')) {
-      try {
-        const dUrl = new URL(url);
-        const reqItags = dUrl.searchParams.getAll('itag').map(Number);
-        const pathMatch = dUrl.pathname.match(/\/itag\/(\d+)/);
-        if (pathMatch) reqItags.push(Number(pathMatch[1]));
-
-        const activeItag = Number(status.activeAudioItag);
-
-        let isMatch = reqItags.includes(activeItag);
-        if (!isMatch) {
-          if (activeItag === 141 && reqItags.includes(140)) isMatch = true;
-        }
-
-        if (isMatch) {
-          const clen = status.contentLength || url.match(/[\?&]clen=(\d+)/)?.[1] || '999999999';
-          let dlUrl = url;
-          if (dlUrl.includes('range=')) {
-            dlUrl = dlUrl.replace(/([\?&])range=[^&]*/, `$1range=0-${clen}`);
-          } else {
-            dlUrl += `&range=0-${clen}`;
-          }
-
-          if (status.downloadUrl !== dlUrl) {
-            status.downloadUrl = dlUrl;
-            report();
-          }
-        }
-      } catch (e) { }
-    }
-
     // ── Block emergency itag blacklist ───────────────────────────────────
     if (url.includes('streaming_data_emergency_itag_blacklist')) {
       console.log(TAG, '[BlacklistBlock] Blocked emergency itag blacklist');
@@ -9210,46 +9165,6 @@
   };
 
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-    if (typeof url === 'string' && url.includes('googlevideo.com/videoplayback')) {
-      try {
-        const dUrl = new URL(url);
-        const reqItags = dUrl.searchParams.getAll('itag').map(Number);
-        const pathMatch = dUrl.pathname.match(/\/itag\/(\d+)/);
-        if (pathMatch) reqItags.push(Number(pathMatch[1]));
-
-        const activeItag = Number(status.activeAudioItag);
-
-        let isMatch = reqItags.includes(activeItag);
-        if (!isMatch) {
-          if (activeItag === 141 && reqItags.includes(140)) isMatch = true;
-        }
-
-        if (isMatch) {
-          const clen = status.contentLength || url.match(/[\?&]clen=(\d+)/)?.[1] || '999999999';
-          let dlUrl = url;
-          if (dlUrl.includes('range=')) {
-            dlUrl = dlUrl.replace(/([\?&])range=[^&]*/, `$1range=0-${clen}`);
-          } else {
-            dlUrl += `&range=0-${clen}`;
-          }
-
-          console.log(TAG, `[XHRCapture] Captured download URL for itag ${activeItag}:`, dlUrl);
-          if (status.downloadUrl !== dlUrl) {
-            status.downloadUrl = dlUrl;
-            report();
-          }
-        } else {
-          // Video-only itags (e.g. 399) legitimately miss the audio matcher — not a fault.
-          const AUDIO_ITAGS = new Set([139, 140, 141, 171, 249, 250, 251, 256, 258, 325, 328, 774]);
-          const looksAudio = reqItags.some(i => AUDIO_ITAGS.has(i));
-          if (looksAudio) {
-            console.log(TAG, `[XHRCapture] Unmatched audio videoplayback: reqItags=${reqItags}, activeItag=${activeItag}`);
-          }
-        }
-      } catch (e) {
-        console.log(TAG, `[XHRCapture] Error:`, e);
-      }
-    }
     this._ytssUrl = url;
     this._ytssSabrRewritten = false;
     return ORIGINAL_XHR_OPEN.call(this, method, url, ...rest);
@@ -9424,13 +9339,11 @@
     },
     getNativeBooster: () => null,
     setShadowVolume: () => {},
-    applySettings: (newSettings) => {
+    applySettings: (newSettings, opts) => {
       Object.assign(S, pickSettings(newSettings));
       persistSettings();
       handleSettingsChange();
-      // shadowVolume is persisted for storage compat; actual gain is applied via
-      // StudioEngine774.syncVol. NativeAudioBooster no longer exists.
-      if (S.autoReload && window.location.href.includes('youtube.com')) {
+      if (opts?.reload && S.autoReload && window.location.href.includes('youtube.com')) {
         window.location.reload();
       }
     },

@@ -414,13 +414,9 @@ async function updateDnrRules({ removeRuleIds = [], addRules = [] }) {
     }
   }
   if (chrome.declarativeNetRequest?.updateDynamicRules) {
-    // Dynamic rules do not allow `tabIds` in conditions on Chromium/Firefox
-    const sanitizedAddRules = addRules.map(rule => {
-      if (!rule.condition?.tabIds) return rule;
-      const cond = { ...rule.condition };
-      delete cond.tabIds;
-      return { ...rule, condition: cond };
-    });
+    // Dynamic rules do not support `tabIds`. Never strip `tabIds` from tab-scoped security
+    // rules (such as YTM_FRAME_RULE_ID stripping XFO/CSP); drop them fail-closed instead.
+    const sanitizedAddRules = addRules.filter(rule => !rule.condition?.tabIds);
     await chrome.declarativeNetRequest.updateDynamicRules({
       removeRuleIds,
       addRules: sanitizedAddRules,
@@ -1274,7 +1270,9 @@ if (FIREFOX_HARVESTER && chrome.runtime.onSuspend?.addListener) {
   });
 }
 
-if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
+// Firefox validates captured URLs via correlated iframe messaging; skip registering
+// webRequest on Firefox so media chunks never wake the MV3 background event page.
+if (!FIREFOX_HARVESTER && chrome.webRequest && chrome.webRequest.onBeforeRequest) {
   chrome.webRequest.onBeforeRequest.addListener(
     (details) => {
       const url = details.url;
@@ -1283,9 +1281,6 @@ if (chrome.webRequest && chrome.webRequest.onBeforeRequest) {
       // STRICT: ONLY intercept genuine ITAG 774 Opus ~280kbps
       const is774 = url.includes('itag=774') || url.includes('/itag/774');
       if (!is774) return;
-      // Firefox's correlated iframe capture validates the media response before
-      // success. onBeforeRequest cannot know whether poToken/decipher is valid.
-      if (FIREFOX_HARVESTER) return;
 
       // CRITICAL: Only intercept requests originating from offscreen/background harvester document (tabId === -1).
       // Normal browser tabs (such as the active YouTube player tab) have tabId >= 0.

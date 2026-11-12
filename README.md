@@ -5,7 +5,7 @@
   <p><sub>Fork of <a href="https://github.com/alithw/YTSpoofingStream">alithw/YTSpoofingStream</a> — modified to run alongside <a href="https://github.com/VORAPIS/V3">Project VORAPIS v3</a></sub></p>
 
   <p>
-    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.6.4-blue.svg?style=flat-square" alt="Latest Release"></a>
+    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.6.5-blue.svg?style=flat-square" alt="Latest Release"></a>
     <img src="https://img.shields.io/badge/manifest-v3-green.svg?style=flat-square" alt="Manifest V3">
     <img src="https://img.shields.io/badge/fork-vorapis%20edition-orange.svg?style=flat-square" alt="Vorapis Edition Fork">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=flat-square" alt="License Apache 2.0">
@@ -19,10 +19,10 @@
 > [!IMPORTANT]
 > **This is a fork, not the upstream project.**
 > Upstream: [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream) (latest upstream stable: v0.2.6).
-> This fork (**vorapis edition**, current: **v0.2.6.4**) adapts the YTSS engine to coexist with Project VORAPIS v3 and ships its own CRX packaging / auto-update feed. Upstream v0.2.6 features (Direct TV UMP-to-MSE 774 demuxer, smart hybrid failover, Volume Balance, Audio-Only, 6-language i18n) are integrated.
+> This fork (**vorapis edition**, current: **v0.2.6.5**) adapts the YTSS engine to coexist with Project VORAPIS v3 and ships its own CRX packaging / auto-update feed. Upstream v0.2.6 features (Direct TV UMP-to-MSE 774 demuxer, smart hybrid failover, Volume Balance, Audio-Only, 6-language i18n) are integrated.
 > Report issues and download releases from **this repository** (`dh6k/YTSpoofingStream_v3`), not upstream.
 
-<sub>**Note on Firefox**: This fork includes a Manifest V3 Firefox port (`manifest.firefox.json` + `./tools/pack-firefox.sh`, Gecko `>= 128.0`) using a single shared codebase with an in-page background DOM harvester shim when `chrome.offscreen` is absent.</sub>
+<sub>**Note on Firefox**: This fork includes a Manifest V3 Firefox port (`manifest.firefox.json` + `./tools/pack-firefox.sh`, Gecko `>= 148.0`) using a single shared codebase with an in-page background DOM harvester shim when `chrome.offscreen` is absent.</sub>
 
 *Read this in other languages: [Tiếng Việt](README-vi.md).*
 
@@ -215,7 +215,7 @@ Run Project VORAPIS v3 via your userscript manager (Tampermonkey). Do not also i
 # output: dist-out/ytspoofingstream-vorapis-<ver>.crx  +  key.pem (keep secret)
 ```
 
-CI: push tag `v0.2.6.2` (or run **Package CRX** workflow). Store `key.pem` as repo secret `CRX_PEM_BASE64` so later builds keep the same extension ID.
+CI: push tag `v0.2.6.5` (or run **Package CRX** workflow). Store `key.pem` as repo secret `CRX_PEM_BASE64` so later builds keep the same extension ID.
 
 `manifest.json` has `update_url` → `https://raw.githubusercontent.com/dh6k/YTSpoofingStream_v3/main/update/updates.xml`. Install the packed `.crx` (Developer mode), then **chrome://extensions → Update** pulls the feed from this fork's Releases. Unpacked installs ignore `update_url`.
 
@@ -242,7 +242,7 @@ CI: push tag `v0.2.6.2` (or run **Package CRX** workflow). Store `key.pem` as re
 3. Click **Load unpacked** and select the extracted `YTSpoofingStream_v3` folder (the folder containing `manifest.json`).
 4. Open YouTube, ensure you are logged into your Premium account, and verify the `★ 774` badge in the player control bar!
 
-### Mozilla Firefox (v128.0+)
+### Mozilla Firefox (v148.0+)
 Build the `.xpi` package first using `./tools/pack-firefox.sh` (which stages `manifest.firefox.json` as `manifest.json` and outputs `dist-out/ytspoofingstream-vorapis-<ver>.xpi`).
 
 1. **Temporary Install (Development / Testing — works on all builds including Stable)**:
@@ -256,8 +256,8 @@ Build the `.xpi` package first using `./tools/pack-firefox.sh` (which stages `ma
      npx web-ext sign --channel=unlisted --api-key="$AMO_JWT_ISSUER" --api-secret="$AMO_JWT_SECRET"
      ```
    - Otherwise, on Firefox Stable you must load it temporarily via `about:debugging` (lost when the browser closes).
-3. **Permanent Install via `about:config` (Firefox ESR / Developer Edition / Nightly / Unbranded ONLY)**:
-   - Setting `xpinstall.signatures.required = false` in `about:config` **ONLY** works on **Firefox ESR, Developer Edition, Nightly, or unbranded builds** — it **does NOT work** on Firefox Stable Release.
+3. **Permanent Install via `about:config` (Firefox Developer Edition / Nightly / Unbranded / ESR 148+ ONLY)**:
+   - Setting `xpinstall.signatures.required = false` in `about:config` **ONLY** works on **Firefox Developer Edition, Nightly, unbranded, or ESR 148+ builds** (do not use ESR 128/140 as `location.ancestorOrigins` requires Gecko 148+) — it **does NOT work** on Firefox Stable Release.
    - On those supported builds, set `xpinstall.signatures.required` to `false` in `about:config`, then drag-and-drop `dist-out/ytspoofingstream-vorapis-<ver>.xpi` into `about:addons` (or choose **Install Add-on From File...**).
 
 ---

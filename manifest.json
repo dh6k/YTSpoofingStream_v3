@@ -17,7 +17,6 @@
     "cookies",
     "declarativeNetRequest",
     "alarms",
-    "downloads",
     "offscreen",
     "webRequest"
   ],

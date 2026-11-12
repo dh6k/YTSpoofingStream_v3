@@ -267,16 +267,11 @@
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
 
-      // Send settings to content script (inject.js) via messaging
+      // Persist synchronous document_start snapshot and trigger reload when required
       execInYouTubeTab(tabs[0], {
         func: (s, isLive) => {
           localStorage.setItem('ytss_settings', JSON.stringify(s));
-          localStorage.setItem('ytSpoofingStream_settings', JSON.stringify(s));
-          if (window.YTSS_SpoofingMethods && typeof window.YTSS_SpoofingMethods.applySettings === 'function') {
-            window.YTSS_SpoofingMethods.applySettings(s);
-          } else {
-            window.postMessage({ type: 'YTSpoofingStream_settingsUpdate', settings: s }, '*');
-          }
+          window.postMessage({ type: 'YTSS_SETTINGS_UPDATE', settings: s }, '*');
           if (s.audioOnly !== undefined) {
             window.postMessage({ type: 'YTSS_SET_AUDIO_ONLY', audioOnly: s.audioOnly }, '*');
           }

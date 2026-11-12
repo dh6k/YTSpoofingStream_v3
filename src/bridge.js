@@ -1,5 +1,5 @@
 // ╔══════════════════════════════════════════════════════════════════╗
-// ║  YTSpoofingStream v0.2.6 — Bridge (ISOLATED world)               ║
+// ║  YTSpoofingStream v0.2.6.5 — Bridge (ISOLATED world)             ║
 // ║  Relays messages between MAIN world and Service Worker.          ║
 // ╚══════════════════════════════════════════════════════════════════╝
 
@@ -151,7 +151,7 @@ function postIfEnabled(msg) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === 'YTSS_SW_TRIGGER' || msg.type === 'YTSS_DOWNLOAD_AUDIO' || msg.type === 'YTSS_SET_AUDIO_ONLY') {
+  if (msg.type === 'YTSS_SW_TRIGGER' || msg.type === 'YTSS_SET_AUDIO_ONLY') {
     postIfEnabled(msg);
   }
 });

@@ -5,7 +5,7 @@
   <p><sub>Fork của <a href="https://github.com/alithw/YTSpoofingStream">alithw/YTSpoofingStream</a> — chỉnh sửa để chạy song song với <a href="https://github.com/VORAPIS/V3">Project VORAPIS v3</a></sub></p>
 
   <p>
-    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.6.4-blue.svg?style=flat-square" alt="Phiên bản Mới nhất"></a>
+    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.6.5-blue.svg?style=flat-square" alt="Phiên bản Mới nhất"></a>
     <img src="https://img.shields.io/badge/manifest-v3-green.svg?style=flat-square" alt="Manifest V3">
     <img src="https://img.shields.io/badge/fork-vorapis%20edition-orange.svg?style=flat-square" alt="Vorapis Edition Fork">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=flat-square" alt="Giấy phép Apache 2.0">
@@ -19,10 +19,10 @@
 > [!IMPORTANT]
 > **Đây là fork, không phải dự án gốc.**
 > Dự án gốc: [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream) (phiên bản ổn định gốc: v0.2.6).
-> Fork này (**vorapis edition**, hiện tại: **v0.2.6.4**) điều chỉnh engine YTSS để chạy song song với Project VORAPIS v3, kèm đóng gói CRX và feed tự cập nhật riêng. Đã tích hợp các tính năng upstream v0.2.6 (Direct TV UMP-to-MSE 774 demuxer, smart hybrid failover, Volume Balance, Audio-Only, i18n 6 ngôn ngữ).
+> Fork này (**vorapis edition**, hiện tại: **v0.2.6.5**) điều chỉnh engine YTSS để chạy song song với Project VORAPIS v3, kèm đóng gói CRX và feed tự cập nhật riêng. Đã tích hợp các tính năng upstream v0.2.6 (Direct TV UMP-to-MSE 774 demuxer, smart hybrid failover, Volume Balance, Audio-Only, i18n 6 ngôn ngữ).
 > Báo lỗi và tải release từ **repository này** (`dh6k/YTSpoofingStream_v3`), không phải repo gốc.
 
-<sub>**Lưu ý về Firefox**: Fork này có hỗ trợ bản port Firefox Manifest V3 (`manifest.firefox.json` + `./tools/pack-firefox.sh`, Gecko `>= 128.0`) dùng chung một codebase với lớp shim harvester chạy trực tiếp trong DOM của background event page khi không có `chrome.offscreen`.</sub>
+<sub>**Lưu ý về Firefox**: Fork này có hỗ trợ bản port Firefox Manifest V3 (`manifest.firefox.json` + `./tools/pack-firefox.sh`, Gecko `>= 148.0`) dùng chung một codebase với lớp shim harvester chạy trực tiếp trong DOM của background event page khi không có `chrome.offscreen`.</sub>
 
 *Đọc bằng ngôn ngữ khác: [English](README.md).*
 
@@ -215,7 +215,7 @@ Chạy Project VORAPIS v3 qua userscript manager (Tampermonkey). Không tiêm th
 # output: dist-out/ytspoofingstream-vorapis-<ver>.crx  +  key.pem (giữ bí mật)
 ```
 
-CI: push tag `v0.2.6.4` (hoặc chạy workflow **Package CRX**). Lưu `key.pem` dưới secret `CRX_PEM_BASE64` để các bản sau giữ nguyên extension ID.
+CI: push tag `v0.2.6.5` (hoặc chạy workflow **Package CRX**). Lưu `key.pem` dưới secret `CRX_PEM_BASE64` để các bản sau giữ nguyên extension ID.
 
 `manifest.json` có `update_url` → `https://raw.githubusercontent.com/dh6k/YTSpoofingStream_v3/main/update/updates.xml`. Cài `.crx` đã đóng gói (Developer mode), rồi **chrome://extensions → Update** để kéo feed từ Releases của fork này. Bản unpacked bỏ qua `update_url`.
 
@@ -243,7 +243,7 @@ CI: push tag `v0.2.6.4` (hoặc chạy workflow **Package CRX**). Lưu `key.pem`
 4. Nhấn nút **Tải tiện ích đã giải nén (Load unpacked)** và chọn thư mục gốc `YTSpoofingStream_v3` (thư mục chứa file `manifest.json`).
 5. Mở YouTube, đảm bảo đã đăng nhập tài khoản có Premium, và thưởng thức âm thanh chuẩn phòng thu với huy hiệu `★ 774` trên thanh điều khiển!
 
-### Mozilla Firefox (v128.0+)
+### Mozilla Firefox (v148.0+)
 Trước tiên, đóng gói file `.xpi` bằng lệnh `./tools/pack-firefox.sh` (script sẽ sao chép `manifest.firefox.json` thành `manifest.json` và xuất gói tại `dist-out/ytspoofingstream-vorapis-<ver>.xpi`).
 
 1. **Cài đặt tạm thời (Phát triển / Kiểm thử — hoạt động trên mọi bản Firefox kể cả bản Stable)**:
@@ -257,8 +257,8 @@ Trước tiên, đóng gói file `.xpi` bằng lệnh `./tools/pack-firefox.sh` 
      npx web-ext sign --channel=unlisted --api-key="$AMO_JWT_ISSUER" --api-secret="$AMO_JWT_SECRET"
      ```
    - Nếu không ký qua AMO, trên bản Stable chỉ có thể cài tạm qua `about:debugging` (mất khi tắt trình duyệt).
-3. **Cài đặt vĩnh viễn qua `about:config` (CHỈ dành cho Firefox ESR / Developer Edition / Nightly / Unbranded)**:
-   - Thiết lập `xpinstall.signatures.required = false` trong `about:config` **CHỈ hoạt động** trên **Firefox ESR, Developer Edition, Nightly hoặc bản unbranded** — **KHÔNG hoạt động** trên bản Firefox Stable Release.
+3. **Cài đặt vĩnh viễn qua `about:config` (CHỈ dành cho Firefox Developer Edition / Nightly / Unbranded / ESR 148+)**:
+   - Thiết lập `xpinstall.signatures.required = false` trong `about:config` **CHỈ hoạt động** trên **Firefox Developer Edition, Nightly, bản unbranded hoặc ESR 148+** (không dùng ESR 128/140 vì thiếu `location.ancestorOrigins`) — **KHÔNG hoạt động** trên bản Firefox Stable Release.
    - Trên các bản hỗ trợ cờ này, mở `about:config`, đặt `xpinstall.signatures.required` thành `false`, sau đó kéo-thả file `dist-out/ytspoofingstream-vorapis-<ver>.xpi` vào trang `about:addons` (hoặc chọn **Install Add-on From File...**).
 
 ---

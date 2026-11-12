@@ -146,18 +146,37 @@ jobs:
           fi
           echo "Published feed for appid=${EXT_ID} version=${VER}"
 
-      - name: Upload CRX to Release
+      - name: Pack Firefox XPI
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          cp manifest.firefox.json manifest.firefox.json.bak
+          node -e "
+            const fs=require('fs');
+            const m=JSON.parse(fs.readFileSync('manifest.firefox.json','utf8'));
+            m.version=process.env.VER;
+            fs.writeFileSync('manifest.firefox.json', JSON.stringify(m,null,2)+'\n');
+          "
+          bash tools/pack-firefox.sh "$GITHUB_WORKSPACE"
+          mv manifest.firefox.json.bak manifest.firefox.json
+          test -f "$GITHUB_WORKSPACE/ytspoofingstream-vorapis-${VER}.xpi"
+
+      - name: Upload CRX and XPI to Release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VER: ${{ steps.ver.outputs.version }}
         run: |
-          ls -la *.crx
+          ls -la *.crx *.xpi
           gh release create "v${VER}" \
             "ytspoofingstream-vorapis-${VER}.crx" \
+            "ytspoofingstream-vorapis-${VER}.xpi" \
             --title "v${VER}" \
-            --notes "Packed CRX for ytsSpoofingstream (vorapis edition). Install with Developer mode, then chrome://extensions -> Update." \
-            || gh release upload "v${VER}" "ytspoofingstream-vorapis-${VER}.crx" --clobber
+            --notes "Packed CRX (Chromium) and XPI (Firefox 148+) for ytspoofingstream (vorapis edition)." \
+            || gh release upload "v${VER}" \
+              "ytspoofingstream-vorapis-${VER}.crx" \
+              "ytspoofingstream-vorapis-${VER}.xpi" \
+              --clobber
 
       - name: Warn if signing key was newly generated
         if: always()
