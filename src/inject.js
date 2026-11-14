@@ -1588,6 +1588,7 @@
       return;
     }
     if (isVolUiTarget(e.target)) {
+      window.__ytssVolDragging = true;
       if (typeof StudioEngine774 !== 'undefined') {
         StudioEngine774._lastUserMuteOrVolIntentAt = Date.now();
       }
@@ -1604,6 +1605,12 @@
 
   const onPointerEnd = () => {
     window.__ytssPointerDown = false;
+    if (window.__ytssVolDragging) {
+      window.__ytssVolDragging = false;
+      if (typeof StudioEngine774 !== 'undefined') {
+        StudioEngine774._lastUserMuteOrVolIntentAt = Date.now();
+      }
+    }
     if (typeof StudioEngine774 !== 'undefined' && StudioEngine774._isTimelineScrubbing) {
       StudioEngine774._isTimelineScrubbing = false;
       StudioEngine774._timelineScrubUntil = Date.now() + 600;
@@ -3745,7 +3752,7 @@
     },
 
     hasRecentUserMuteOrVolIntent() {
-      return (Date.now() - (this._lastUserMuteOrVolIntentAt || 0)) < 1500;
+      return Boolean(window.__ytssVolDragging || (Date.now() - (this._lastUserMuteOrVolIntentAt || 0)) < 1500);
     },
 
     hasRecentUserSeekIntent() {
@@ -4263,7 +4270,7 @@
       const rawUserVol = (typeof this._userVol === 'number' && !isNaN(this._userVol) && this._userVol > 0.05)
         ? this._userVol
         : (stored.volume > 0.05 ? stored.volume : 1.0);
-      const isMuted = this.hasRecentUserMuteOrVolIntent() ? Boolean(this._userMuted) : false;
+      const isMuted = Boolean(this._userMuted);
 
       const restore = (v) => {
         if (!v || v === this.audio) return;
@@ -4327,12 +4334,12 @@
       // Track explicit user interactions for Mute/Volume vs Seek so we never confuse
       // internal YouTube transition/buffer glitches with genuine user actions
       const markPointerIntent = (e) => {
+        if (!e.isTrusted) return;
         const t = e.target;
-        if (!t || typeof t.closest !== 'function') return;
-        if (t.closest('.ytp-mute-button, .ytp-volume-panel, .html5-volume-panel, .ytp-volume-area, .ytp-volume-slider, .ytp-volume-slider-handle, .ytp-volume-icon, [class*="volume"]')) {
+        if (isVolUiTarget(t)) {
           this._lastUserMuteOrVolIntentAt = Date.now();
         }
-        if (t.closest('.ytp-progress-bar, .html5-progress-bar, .ytp-progress-bar-container, .html5-progress-bar-container, .ytp-scrubber-container, .html5-scrubber-button, .ytp-chapter-container, .ytp-fine-scrubbing-container, [class*="progress-bar"], [class*="scrubber"], a[href*="t="], ytd-macro-markers-list-item-renderer')) {
+        if (isSeekUiTarget(t)) {
           this._lastUserSeekIntentAt = Date.now();
         }
       };
