@@ -3634,7 +3634,7 @@
       const uv = (typeof getVideoIdFromUrl === 'function') ? getVideoIdFromUrl() : null;
       const nav = (typeof navTargetVideoId === 'string' && VIDEO_ID_RE.test(navTargetVideoId)) ? navTargetVideoId : null;
       const outgoing = (this._outgoingVideoId && Date.now() < (this._outgoingUntil || 0)) ? this._outgoingVideoId : null;
-      if (pv && pv === cur && outgoing === pv) {
+      if (pv && cur && pv === cur && this._outgoingVideoId) {
         this._outgoingVideoId = null;
         this._outgoingUntil = 0;
       }
@@ -4305,7 +4305,6 @@
           if (v !== this.audio) restore(v);
         });
       } catch (e) {}
-      this._hookedVideos.clear();
       if (!opts.keepTransition) {
         this._isTransitioning = false;
         this._transitionTargetVid = null;
