@@ -3816,6 +3816,28 @@
         const vNow = getMainVideoElement();
         if (vNow && !vNow.paused && !vNow.ended) return;
         if (document.getElementById('movie_player')?.getPlayerState?.() === 1) return;
+        // Hidden-tab environmental suspends (Firefox throttling a background
+        // <video>) park the player at state 2/-1 with the video paused while the
+        // user is still listening; the single state probe above is not proof.
+        // Background listening is a core feature: keep the audible stream unless
+        // the track truly ended. Confirm with a second sample 500ms later that the
+        // master clock is genuinely frozen before muting a hidden-tab stream.
+        if (document.hidden) {
+          if (!vNow || vNow.ended) { PlaybackArbiter.pauseAudio('defer-env-pause-ended'); return; }
+          const frozenAt = vNow.currentTime;
+          const confirmTimer = setTimeout(() => {
+            this._hiddenPauseConfirmTimer = null;
+            if (!this.isActive || !this.audio || this.audio.paused || this._userPaused) return;
+            const v2 = getMainVideoElement();
+            if (!v2 || v2.ended) { PlaybackArbiter.pauseAudio('defer-env-pause-ended'); return; }
+            if (!v2.paused || Math.abs(v2.currentTime - frozenAt) > 0.01) return; // resumed / still ticking: environmental
+            if (document.getElementById('movie_player')?.getPlayerState?.() === 1) return;
+            PlaybackArbiter.pauseAudio('defer-env-pause-confirmed');
+          }, 500);
+          if (this._hiddenPauseConfirmTimer) clearTimeout(this._hiddenPauseConfirmTimer);
+          this._hiddenPauseConfirmTimer = confirmTimer;
+          return;
+        }
         PlaybackArbiter.pauseAudio('defer-env-pause');
       }, 600);
     },
@@ -4910,17 +4932,27 @@
             return;
           }
           if (e.type === 'pause') {
+            // BACKGROUND PAUSE / SUSPEND RESILIENCE (Firefox throttles hidden <video>):
+            // A pause event while the tab is hidden is environmental until the player
+            // API confirms otherwise. The old code trusted a single getPlayerState()
+            // reading — which lags by a tick right after the browser suspends the
+            // element — and latched _userPaused + paused the audible 774 stream.
+            // When the video resumed a moment later the audio came back a few
+            // hundred ms late: the reported "audio mutes then unmutes / stutters
+            // while YouTube runs in the background".
             const pState = document.getElementById('movie_player')?.getPlayerState?.();
-            // If YouTube player state is 1 (playing), Chrome is just background-throttling the video element; keep playing audio!
-            if (pState === 1 && !video.ended) {
-              try {
-                e.stopImmediatePropagation();
-                e.stopPropagation();
-              } catch (err) {}
+            const trackEnded = video.ended || pState === 0;
+            const genuinelyPaused = trackEnded || (pState === 2 && !video.ended);
+            if (!genuinelyPaused) {
+              // Environmental suspend (pState lagging, buffering, or unstarted):
+              // keep the audible stream running; the watchdog advances the silent
+              // video to stay in sync.
+              try { e.stopImmediatePropagation(); e.stopPropagation(); } catch (err) {}
               return;
             }
-            // Otherwise (pState === 2 for paused, or 0 for ended, or -1 for unstarted), genuine pause!
-            this._userPaused = true;
+            // Confirmed paused/ended while hidden. Do not latch a sticky user pause
+            // from a hidden-tab pause (the user cannot have pressed anything): the
+            // media-session pause already muted the stream through userPause().
             PlaybackArbiter.userPause('hidden-pause');
             PlaybackArbiter.pauseAudio('hidden-pause');
             return;
@@ -5329,6 +5361,16 @@
             // YT paused (UI button / space / media session through player)
             // Ignore state 2 noise during fullscreen transitions, track transitions, or timeline seek/scrub.
             if (!fsBusy()) {
+              // Hidden-tab environmental suspend: Firefox parks a background
+              // <video> and the player reports state 2 while the user is still
+              // listening. That must not arm the sticky pause lock (it muted the
+              // background stream until the tab was focused again). Only a state-2
+              // that survives while the tab is VISIBLE (or a real gesture) is a
+              // user pause.
+              if (document.hidden && !pauseGesturePending()) {
+                ChannelHealth.note('hidden-state2', {});
+                return;
+              }
               const userPauseIntentState2 = pauseGesturePending();
               const inTransition = Boolean(this._isTransitioning || this.isInTransitionWindow() || isSpaNavigating);
               if (IS_FIREFOX && !userPauseIntentState2 && !this._userPaused && Date.now() < (this._tabReturnGraceUntil || 0)) {
