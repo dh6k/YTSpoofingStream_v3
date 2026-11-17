@@ -2508,6 +2508,14 @@
 
       if (!session.hasInit || bufEndSec === null) {
         targetMs = Math.max(0, Math.floor(curSec * 1000));
+        // Same inclusive-target rule as the buffered branch: never ask for a
+        // timestamp inside the last fetched cluster, even when MSE has no strict
+        // range covering the playhead yet (append still settling). Without this
+        // floor the first pump after attach re-requested the cluster it already
+        // had, got an all-duplicate response and burned a supply failure.
+        if (session.lastContigEndMs) {
+          targetMs = Math.max(targetMs, session.lastContigEndMs + 15);
+        }
         session.reachedEof = false;
         session.emptyResponses = 0;
       } else {
@@ -2529,8 +2537,17 @@
         if (aheadSec >= 30.0) {
           return; // Plenty of 774 Opus buffer ahead
         }
+        // Request targets are INCLUSIVE on the SABR timeline: asking for `t` returns the
+        // cluster containing `t`, i.e. the cluster we just appended whenever `t` falls
+        // inside it. The demux watermark (lastContigEndMs) is the authoritative "everything
+        // up to here is fetched" mark — the next request must ALWAYS start past it. The old
+        // conditional floor (only applied when |bufEnd - watermark| < 600ms) let the target
+        // fall back INSIDE the last appended cluster whenever the MSE buffered end lagged
+        // the watermark by > 600ms (append queue settling / updateend ordering); the server
+        // then re-delivered that same cluster 3 times, every response was duplicate-skipped
+        // and supply failed over to native 251 ("TV UMP response made no media progress").
         targetMs = Math.round(bufEndSec * 1000) + 15;
-        if (session.lastContigEndMs && Math.abs(bufEndSec * 1000 - session.lastContigEndMs) < 600) {
+        if (session.lastContigEndMs) {
           targetMs = Math.max(targetMs, session.lastContigEndMs + 15);
         }
         if (durSec > 0 && targetMs >= durSec * 1000 - 200) {
@@ -2643,6 +2660,7 @@
         session.redirectCount = 0;
         session.emptyResponses = 0;
         let queuedMedia = 0;
+        let dupsMadeProgress = false;
         for (const seg of demuxed.segments) {
           if (seg.isInit) {
             const initInfo = this.opusInitChannelInfo(seg.data);
@@ -2672,8 +2690,11 @@
             // stays right. seek resets the watermark to -1 (see onSeek).
             if (session.lastAppendedSeq >= 0 && seg.seq <= session.lastAppendedSeq) {
               session.dupsSkipped = (session.dupsSkipped || 0) + 1;
-              session.lastContigEndMs = Math.max(session.lastContigEndMs || 0, seg.startMs + seg.durMs);
+              const newEnd = seg.startMs + seg.durMs;
+              const watermarkAdvanced = newEnd > (session.lastContigEndMs || 0);
+              session.lastContigEndMs = Math.max(session.lastContigEndMs || 0, newEnd);
               console.log(TAG, `[UmpMse774] Skipped duplicate cluster seq=${seg.seq} (last appended=${session.lastAppendedSeq}, skipped=${session.dupsSkipped})`);
+              if (watermarkAdvanced) dupsMadeProgress = true;
             } else {
               session.appendQueue.push(seg.data);
               queuedMedia++;
@@ -2685,7 +2706,18 @@
         }
 
         if (!queuedMedia && session.appendQueue.length === 0) {
-          this._supplyFailure(session, 'TV UMP response made no media progress');
+          // An all-duplicate response is NOT a failure when it advanced the demux
+          // watermark (the server confirmed everything up to endMs): the next pump
+          // targets strictly past the watermark (see targetMs floor), so progress is
+          // guaranteed. Only flag failure when the watermark did not move either —
+          // that is a genuine stalled response.
+          if (dupsMadeProgress) {
+            session.errorCount = 0;
+            session.emptyResponses = 0;
+            this._supplyState(session, 'healthy', 'duplicate-confirmed watermark');
+          } else {
+            this._supplyFailure(session, 'TV UMP response made no media progress');
+          }
           return;
         }
 
