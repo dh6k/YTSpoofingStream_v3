@@ -5,7 +5,7 @@
   <p><sub>Fork of <a href="https://github.com/alithw/YTSpoofingStream">alithw/YTSpoofingStream</a> — modified to run alongside <a href="https://github.com/VORAPIS/V3">Project VORAPIS v3</a></sub></p>
 
   <p>
-    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.7.3-blue.svg?style=flat-square" alt="Latest Release"></a>
+    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.7.4-blue.svg?style=flat-square" alt="Latest Release"></a>
     <img src="https://img.shields.io/badge/manifest-v3-green.svg?style=flat-square" alt="Manifest V3">
     <img src="https://img.shields.io/badge/fork-vorapis%20edition-orange.svg?style=flat-square" alt="Vorapis Edition Fork">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=flat-square" alt="License Apache 2.0">
@@ -19,7 +19,7 @@
 > [!IMPORTANT]
 > **This is a fork, not the upstream project.**
 > Upstream: [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream) (latest upstream stable: v0.2.7).
-> This fork (**vorapis edition**, current: **v0.2.7.3**) adapts the YTSS engine to coexist with Project VORAPIS v3 and ships its own CRX packaging / auto-update feed. Upstream v0.2.7 features (Direct TV UMP-to-MSE 774 demuxer, smart hybrid failover, Volume Balance, Audio-Only, seamless track transition audio, complete disable unhooking, 6-language i18n) are integrated.
+> This fork (**vorapis edition**, current: **v0.2.7.4**) adapts the YTSS engine to coexist with Project VORAPIS v3 and ships its own CRX packaging / auto-update feed. Upstream v0.2.7 features (Direct TV UMP-to-MSE 774 demuxer, smart hybrid failover, Volume Balance, Audio-Only, seamless track transition audio, complete disable unhooking, 6-language i18n) are integrated.
 > Report issues and download releases from **this repository** (`dh6k/YTSpoofingStream_v3`), not upstream.
 
 <sub>**Note on Firefox**: This fork includes a Manifest V3 Firefox port (`manifest.firefox.json` + `./tools/pack-firefox.sh`, Gecko `>= 148.0`) using a single shared codebase with an in-page background DOM harvester shim when `chrome.offscreen` is absent.</sub>

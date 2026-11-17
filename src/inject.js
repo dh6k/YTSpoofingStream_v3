@@ -1892,7 +1892,10 @@
         decreasingForMs: session.supplyDecreasingAt ? now - session.supplyDecreasingAt : 0,
         requestAgeMs: session.inFlight && session.requestStartedAt ? now - session.requestStartedAt : 0,
         failures: session.supplyFailures || 0, lastProgressAt: session.lastProgressAt || 0,
-        fetching: !!session.inFlight, pumpStopped: !!(session.aborted || session.reachedEof),
+        fetching: !!session.inFlight,
+        // reachedEof with buffered 774 remaining is a normal end-of-track state, not a dead
+        // pump: the watchdog must not fault (and then fall back) while audible Opus remains.
+        pumpStopped: !!(session.aborted || (session.reachedEof && ahead < 0.4)),
         queued: session.appendQueue.length
       };
     },
@@ -3500,8 +3503,16 @@
           }
         }
       } catch (e) {}
-      const supply = this.best774Candidate?._isUmpMse && typeof UmpMseController774.getSourceHealth === 'function'
-        ? UmpMseController774.getSourceHealth(this.activeVideoId) : null;
+      // Health is only meaningful for the CURRENT track: getSourceHealth(videoId) falls
+      // back to lastSourceHealth when the live session belongs to another video — that
+      // snapshot is from the PREVIOUS track's stopped pump (pumpStopped: true, old
+      // videoId). Feeding it into the watchdog faulted 'pump-stopped' on a freshly
+      // attached 774 stream (within ~1.3s of opening a new video), burned the recovery
+      // deadline and fell back to native 251 even though nothing was wrong.
+      const umpHealth = (this.best774Candidate?._isUmpMse && typeof UmpMseController774.getSourceHealth === 'function')
+        ? UmpMseController774.getSourceHealth(this.activeVideoId)
+        : null;
+      const supply = (umpHealth && (!this.activeVideoId || !umpHealth.videoId || umpHealth.videoId === this.activeVideoId)) ? umpHealth : null;
       const prev = this._healthSample;
       const sample = {
         t: now, videoTime: video.currentTime, audioTime: audio ? audio.currentTime : null,
@@ -3614,6 +3625,36 @@
           this.syncVol(video);
         } else if (reason === 'unexpected-pause' && !this._isAudioBuffering) {
           this._tryPlayAudio();
+        } else if (reason === 'pump-stopped' && this.best774Candidate?._isUmpMse && UmpMseController774.isActive) {
+          // The UMP pump flagged itself stopped (reachedEof on an empty response, or a
+          // state the watchdog interprets as dead) while audible 774 buffer still exists.
+          // onSeek() is a NO-OP when the audio position is still inside the MSE buffer,
+          // so _reconnectStream cannot repair this class of fault — the deadline then
+          // expired and killed a stream that was still playing fine. Recover in place:
+          // a false reachedEof is cleared and the pump restarted at the live position;
+          // an aborted session is re-attached from the cached TV context.
+          const ump = UmpMseController774;
+          const sess = ump.session;
+          const aliveBuffer = sample.aheadSec > 0.4;
+          if (sess && !sess.aborted) {
+            if (sess.reachedEof && aliveBuffer) {
+              ChannelHealth.note('ump-repair', { kind: 'eof-cleared', aheadSec: sample.aheadSec });
+              sess.reachedEof = false;
+              sess.endedStream = false;
+              sess.supplyFailures = 0;
+              sess.supplyFailedAt = 0;
+              sess.retryAt = 0;
+              ump._supplyState(sess, 'healthy', 'watchdog-repair-restart');
+              ump.pump(sess);
+            } else if (aliveBuffer) {
+              // stopped-state session with buffer remaining: treat as healthy delivery
+              ump._supplyState(sess, 'healthy', 'watchdog-repair-stopped-state');
+            } else {
+              this._reconnectStream('health:' + reason, video.currentTime);
+            }
+          } else {
+            this._reconnectStream('health:' + reason, video.currentTime);
+          }
         } else if (this.isActive && this.best774Candidate) {
           if (audio?.isConnected === false) (document.body || document.documentElement).appendChild(audio);
           this._reconnectStream('health:' + reason, video.currentTime);
