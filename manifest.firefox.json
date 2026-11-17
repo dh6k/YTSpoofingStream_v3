@@ -1,14 +1,16 @@
 {
   "manifest_version": 3,
   "name": "ytspoofingstream (vorapis edition)",
-  "version": "0.2.7",
+  "version": "0.2.7.1",
   "description": "Force Studio Opus 774 on YouTube. Runs alongside Project VORAPIS v3 (userscript).",
   "browser_specific_settings": {
     "gecko": {
       "id": "ytspoofingstream@dh6k",
       "strict_min_version": "148.0",
       "data_collection_permissions": {
-        "required": ["none"]
+        "required": [
+          "none"
+        ]
       }
     }
   },
