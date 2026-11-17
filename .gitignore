@@ -21,3 +21,5 @@ firefox_smoke_test.js
 tmp/
 *.log
 *.jpg
+package.json
+package-lock.json
