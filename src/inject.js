@@ -3368,13 +3368,22 @@
       try { e.audio.currentTime = n; return true; } catch (x) { return false; }
     },
 
-    // (4) playbackRate is written only by the drift controller.
+    // (4) playbackRate is written only by the drift controller. Pitch is ALWAYS
+    // preserved: a drift correction must change tempo, never pitch. Without this,
+    // a 0.97x correction dropped the pitch 3% and listeners heard the whole track
+    // "slowed down / wrong" for as long as the correction was active.
     setRate(rate, reason) {
       if (reason !== 'drift') return this._violation('rate-write-non-drift', reason, { rate: rate });
       const e = this._eng();
       if (!e || !e.audio) return false;
       const n = Number(rate);
       if (!isFinite(n) || n <= 0) return false;
+      try {
+        // Set BEFORE the rate write so the very first correction is already pitched correctly.
+        if ('preservesPitch' in e.audio) e.audio.preservesPitch = true;
+        else if ('mozPreservesPitch' in e.audio) e.audio.mozPreservesPitch = true;
+        else if ('webkitPreservesPitch' in e.audio) e.audio.webkitPreservesPitch = true;
+      } catch (x) {}
       if (Math.abs((e.audio.playbackRate || 1.0) - n) < 0.0005) return true;
       this.ops.rate++;
       this._note('op', 'rate:' + reason, { rate: Math.round(n * 10000) / 10000 });
@@ -6028,6 +6037,7 @@
         this._driftSmooth = null;
         this._driftHist = [];
         this._corrActive = false;
+        this._corrStartedAt = 0;
         this._driftOutsideTicks = 0;
         this._startupAlignTicks = 0;
         this._rateCorrection = 1.0;
@@ -6085,13 +6095,35 @@
         }
       } else if (smMs < 35) {
         this._corrActive = false;
-      }
-      if (!this._corrActive) {
+      } else if (this._corrActive && now > (this._corrStartedAt || 0) + 6000) {
+        // Correction budget: a correction converges within seconds when the drift
+        // is real. One that is still outside the exit band after 6s means the
+        // measured drift is NOT converging (e.g. a steady clock skew against the
+        // MSE timeline) — holding the rate offset forever made the whole track
+        // sound slowed down (Symptom C). Give up on rate, hand the residual to
+        // the hard paths, and let playback return to exactly the user rate.
+        this._corrActive = false;
+        this._corrGaveUpAt = now;
+        this._driftOutsideTicks = 0;
         this._rateCorrection = 1.0;
         this._rateCorrectionUntil = 0;
         return;
       }
-      const mag = Math.min(0.03, Math.max(0.004, smMs / 2500));
+      if (this._corrActive && !this._corrStartedAt) this._corrStartedAt = now;
+      if (!this._corrActive) {
+        this._corrStartedAt = 0;
+        this._rateCorrection = 1.0;
+        this._rateCorrectionUntil = 0;
+        return;
+      }
+      // Proportional magnitude with a REAL floor tied to audible-ness: the old
+      // 0.4% floor held a rate offset on drifts as small as ~10ms that could
+      // never exit the 35ms band — the offset lingered for the whole track
+      // (constant slight slowdown). Corrections are only worth their pitch
+      // impact when the drift they erase is at least what the offset covers
+      // during its lifetime (~2s); below that, snap-quiet convergence does more
+      // harm than good.
+      const mag = Math.min(0.03, Math.max(0.006, smMs / 2500));
       this._rateCorrection = sm > 0 ? (1 - mag) : (1 + mag);
       this._rateCorrectionUntil = now + 2000;
     },
