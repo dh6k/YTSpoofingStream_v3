@@ -3709,6 +3709,13 @@
     // state so the control bar does not show a stale pause/play icon.
     lockPause() {
       if (this._locking) return;
+      // An engine-internal hold (startup audio-buffer hold) must never be
+      // promoted to a user pause lock: the 150ms reassert interval would keep
+      // re-pausing the picture and the video would never autoplay.
+      if (this._pausedForAudioBuffer) {
+        ChannelHealth.note('lock-refused-hold', {});
+        return;
+      }
       this._locking = true;
       try {
         this._userPaused = true;
@@ -5361,12 +5368,20 @@
             // YT paused (UI button / space / media session through player)
             // Ignore state 2 noise during fullscreen transitions, track transitions, or timeline seek/scrub.
             if (!fsBusy()) {
+              // Engine-internal holds (audio-buffer hold at startup) pause the video
+              // through the Arbiter; YT then reports state 2. That echo must never arm
+              // the sticky pause lock — doing so made every new video stand still:
+              // the 150ms reassert kept re-pausing the picture after each release.
+              if (this._pausedForAudioBuffer) {
+                ChannelHealth.note('state2-hold-echo', {});
+                return;
+              }
               // Hidden-tab environmental suspend: Firefox parks a background
               // <video> and the player reports state 2 while the user is still
               // listening. That must not arm the sticky pause lock (it muted the
               // background stream until the tab was focused again). Only a state-2
-              // that survives while the tab is VISIBLE (or a real gesture) is a
-              // user pause.
+              // that survives while the tab is VISIBLE (or comes with a real
+              // gesture) is treated as a user pause.
               if (document.hidden && !pauseGesturePending()) {
                 ChannelHealth.note('hidden-state2', {});
                 return;

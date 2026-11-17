@@ -5,7 +5,7 @@
   <p><sub>Fork của <a href="https://github.com/alithw/YTSpoofingStream">alithw/YTSpoofingStream</a> — chỉnh sửa để chạy song song với <a href="https://github.com/VORAPIS/V3">Project VORAPIS v3</a></sub></p>
 
   <p>
-    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.7.8-blue.svg?style=flat-square" alt="Phiên bản Mới nhất"></a>
+    <a href="https://github.com/dh6k/YTSpoofingStream_v3/releases"><img src="https://img.shields.io/badge/release-v0.2.7.9-blue.svg?style=flat-square" alt="Phiên bản Mới nhất"></a>
     <img src="https://img.shields.io/badge/manifest-v3-green.svg?style=flat-square" alt="Manifest V3">
     <img src="https://img.shields.io/badge/fork-vorapis%20edition-orange.svg?style=flat-square" alt="Vorapis Edition Fork">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=flat-square" alt="Giấy phép Apache 2.0">
@@ -19,7 +19,7 @@
 > [!IMPORTANT]
 > **Đây là fork, không phải dự án gốc.**
 > Dự án gốc: [`alithw/YTSpoofingStream`](https://github.com/alithw/YTSpoofingStream) (phiên bản ổn định gốc: v0.2.7).
-> Fork này (**vorapis edition**, hiện tại: **v0.2.7.8**) điều chỉnh engine YTSS để chạy song song với Project VORAPIS v3, kèm đóng gói CRX và feed tự cập nhật riêng. Đã tích hợp các tính năng upstream v0.2.7 (Direct TV UMP-to-MSE 774 demuxer, smart hybrid failover, Volume Balance, Audio-Only, chuyển bài mượt không lặng tiếng, gỡ móc hoàn toàn khi tắt, i18n 6 ngôn ngữ).
+> Fork này (**vorapis edition**, hiện tại: **v0.2.7.9**) điều chỉnh engine YTSS để chạy song song với Project VORAPIS v3, kèm đóng gói CRX và feed tự cập nhật riêng. Đã tích hợp các tính năng upstream v0.2.7 (Direct TV UMP-to-MSE 774 demuxer, smart hybrid failover, Volume Balance, Audio-Only, chuyển bài mượt không lặng tiếng, gỡ móc hoàn toàn khi tắt, i18n 6 ngôn ngữ).
 > Báo lỗi và tải release từ **repository này** (`dh6k/YTSpoofingStream_v3`), không phải repo gốc.
 
 <sub>**Lưu ý về Firefox**: Fork này có hỗ trợ bản port Firefox Manifest V3 (`manifest.firefox.json` + `./tools/pack-firefox.sh`, Gecko `>= 148.0`) dùng chung một codebase với lớp shim harvester chạy trực tiếp trong DOM của background event page khi không có `chrome.offscreen`.</sub>

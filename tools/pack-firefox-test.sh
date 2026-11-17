@@ -22,7 +22,7 @@ node - "$STAGE/manifest.json" <<'JS'
 const fs = require('fs');
 const p = process.argv[2];
 const m = JSON.parse(fs.readFileSync(p, 'utf8'));
-m.version = '0.2.7.8'; // distinct so it can coexist with the real addon
+m.version = '0.2.7.9'; // distinct so it can coexist with the real addon
 m.name = m.name + ' [test]';
 m.content_scripts.unshift({
   matches: ['*://*.youtube.com/*'],
@@ -36,6 +36,6 @@ fs.writeFileSync(p, JSON.stringify(m, null, 2) + '\n');
 JS
 
 npx --yes web-ext build --source-dir "$STAGE" --artifacts-dir "$OUT" \
-  --filename ytspoofingstream-vorapis-0.2.7.8-test.xpi --overwrite-dest >/dev/null
+  --filename ytspoofingstream-vorapis-0.2.7.9-test.xpi --overwrite-dest >/dev/null
 rm -rf "$STAGE"
-echo "Packed test XPI: $OUT/ytspoofingstream-vorapis-0.2.7.8-test.xpi"
+echo "Packed test XPI: $OUT/ytspoofingstream-vorapis-0.2.7.9-test.xpi"
