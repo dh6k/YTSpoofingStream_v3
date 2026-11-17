@@ -183,6 +183,7 @@
 
       // Restore the video element before the DOM teardown hides our overlay.
       if (typeof applyAudioOnlyState === 'function') applyAudioOnlyState();
+      if (typeof InPlayerSettingsUI !== 'undefined') InPlayerSettingsUI.teardown();
       if (typeof StatsForNerdsSpoofer !== 'undefined') StatsForNerdsSpoofer.teardown();
       if (typeof PlayerBadgeUI !== 'undefined') PlayerBadgeUI.teardown();
       // Full teardown: hand the page back its own prototypes and network entry points,
@@ -218,6 +219,7 @@
       hookMediaPrototype();
       hookServiceWorker();
       hookNetwork();
+      if (typeof snapshotHookedDescs === 'function') snapshotHookedDescs();
       if (typeof StudioEngine774 !== 'undefined') StudioEngine774.init();
       if (typeof StatsForNerdsSpoofer !== 'undefined') StatsForNerdsSpoofer.init();
       if (typeof InPlayerSettingsUI !== 'undefined') InPlayerSettingsUI.init();
@@ -775,12 +777,43 @@
     } catch (e) { return null; }
   }
 
+  const HIDDEN_OR_PREVIEW_PLAYER_SEL = '.hid, [hidden], .off-screen, .off-screen-trigger, #inline-preview-player, ytd-video-preview, ytd-thumbnail, #ytd-player-preview';
+
+  function isHiddenOrPreviewNode(el) {
+    return !!(el && typeof el.closest === 'function' && el.closest(HIDDEN_OR_PREVIEW_PLAYER_SEL));
+  }
+
+  function getVisibleV3Chrome() {
+    const chromes = document.querySelectorAll('.html5-player-chrome');
+    for (let i = 0; i < chromes.length; i++) {
+      if (!isHiddenOrPreviewNode(chromes[i])) return chromes[i];
+    }
+    return null;
+  }
+
+  function getActivePlayerRoot() {
+    const mp = document.getElementById('movie_player');
+    if (mp && !isHiddenOrPreviewNode(mp)) return mp;
+    const mini = document.querySelector('ytd-miniplayer .html5-video-player');
+    if (mini && !isHiddenOrPreviewNode(mini)) return mini;
+    const players = document.querySelectorAll('.html5-video-player');
+    for (let i = 0; i < players.length; i++) {
+      if (!isHiddenOrPreviewNode(players[i])) return players[i];
+    }
+    return null;
+  }
+
   function getMainVideoElement() {
-    return document.querySelector('#movie_player video.html5-main-video')
-      || document.querySelector('ytd-miniplayer video.html5-main-video')
-      || document.querySelector('#movie_player video')
-      || Array.from(document.querySelectorAll('video.html5-main-video')).find(v => !v.closest('#inline-preview-player, ytd-video-preview, ytd-thumbnail'))
-      || null;
+    const candidates = [
+      ...document.querySelectorAll('#movie_player video.html5-main-video'),
+      ...document.querySelectorAll('ytd-miniplayer video.html5-main-video'),
+      ...document.querySelectorAll('#movie_player video'),
+      ...document.querySelectorAll('video.html5-main-video')
+    ];
+    for (let i = 0; i < candidates.length; i++) {
+      if (!isHiddenOrPreviewNode(candidates[i])) return candidates[i];
+    }
+    return null;
   }
 
   function isCurrentWatchVideo(vid) {
@@ -1101,9 +1134,9 @@
       hqCache.delete(videoId);
       const advertised774 = merged.filter(f => f.itag === 774 || f._origItag === 774);
       const completeTvContext = Boolean(tvCtx?.serverAbrStreamingUrl && tvCtx?.ustreamerConfig);
-      const only774 = IS_FIREFOX ? advertised774.filter(f => f.url || f._directUrl || completeTvContext) : advertised774;
+      const only774 = advertised774.filter(f => f.url || f._directUrl || completeTvContext || S.operationMode === OP_MODES.TV_RELAY);
       const has774 = only774.length > 0;
-      const supplyError = error || (IS_FIREFOX && !has774 && (
+      const supplyError = error || (!has774 && (
         advertised774.length ? 'UNUSABLE_774' : results.find(r => r.error)?.error || (!results.length ? 'EMPTY_HARVEST' : null)));
       if (has774) {
         confirmedNo774Videos.delete(videoId);
@@ -1119,7 +1152,7 @@
         if (ownsCurrentSupply(videoId)) {
           tryUpgradeVideo(videoId, 'FetchComplete');
         }
-      } else if (IS_FIREFOX && supplyError) {
+      } else if (supplyError) {
         failedFetches.set(videoId, Date.now());
         if (ownsCurrentSupply(videoId)) {
           StudioEngine774.stopAndUnmute(`774 supply: ${supplyError}`, videoId);
@@ -1148,9 +1181,9 @@
         report();
       }
 
-      return { formats: has774 ? only774 : (IS_FIREFOX && supplyError ? [] : merged),
-        streamingContext: IS_FIREFOX && !completeTvContext ? null : tvCtx,
-        ...(IS_FIREFOX && supplyError ? { error: supplyError } : {}) };
+      return { formats: has774 ? only774 : (supplyError ? [] : merged),
+        streamingContext: !completeTvContext && S.operationMode !== OP_MODES.TV_RELAY ? null : tvCtx,
+        ...(supplyError ? { error: supplyError } : {}) };
     });
 
     pendingFetches.set(videoId, fetchPromise);
@@ -1594,6 +1627,17 @@
       }
       return;
     }
+    const targetEl = e.target;
+    const playerContainer = (targetEl && typeof targetEl.closest === 'function')
+      ? targetEl.closest('#movie_player, .html5-video-player, .html5-player-chrome, #player-api, #player-api_VORAPI_ELEMENT_ID, #player, ytd-player, ytd-miniplayer, ytm-player')
+      : null;
+    const isNavLink = (targetEl && typeof targetEl.closest === 'function')
+      ? targetEl.closest('a[href]')
+      : null;
+    if (!playerContainer || isNavLink) {
+      window.__ytssPauseGesture = { at: 0, wasPaused: true, used: true };
+      return;
+    }
     const v = getMainVideoElement();
     window.__ytssPauseGesture = {
       at: Date.now(),
@@ -1813,14 +1857,13 @@
     lastSupplyFailure: null,
 
     _supplyState(session, state, reason) {
-      if (!IS_FIREFOX || !session) return;
+      if (!session) return;
       session.supplyState = state;
       session.supplyReason = String(reason || state);
       ChannelHealth.note('ump-supply', { state, reason: session.supplyReason, videoId: session.videoId, failures: session.supplyFailures || 0 });
     },
 
     getSourceHealth(videoId) {
-      if (!IS_FIREFOX) return null;
       const session = this.session;
       if (!session || (videoId && session.videoId !== videoId)) {
         return this.lastSourceHealth && (!videoId || this.lastSourceHealth.videoId === videoId) ? this.lastSourceHealth : null;
@@ -1855,7 +1898,7 @@
     },
 
     _supplyFallback(session, reason) {
-      if (!IS_FIREFOX || !session || session.aborted || this.session !== session) return;
+      if (!session || session.aborted || this.session !== session) return;
       this._supplyState(session, 'fallback', reason);
       this.lastSupplyFailure = {
         videoId: session.videoId,
@@ -1876,7 +1919,7 @@
     },
 
     _supplyFailure(session, reason, immediate = false) {
-      if (!IS_FIREFOX || !session || session.aborted || this.session !== session) return;
+      if (!session || session.aborted || this.session !== session) return;
       session.supplyFailures = (session.supplyFailures || 0) + 1;
       session.supplyFailedAt = session.supplyFailedAt || Date.now();
       if (immediate || session.supplyFailures >= 3 || Date.now() - session.supplyFailedAt >= 1800) {
@@ -1888,7 +1931,6 @@
     },
 
     requestSupply(reason = 'low-buffer') {
-      if (!IS_FIREFOX) return false;
       const session = this.session;
       if (!session || session.aborted || !session.sourceBuffer) return false;
       const health = this.getSourceHealth(session.videoId);
@@ -2093,38 +2135,41 @@
         return dec;
       }
 
-      const startWait = Date.now();
-      while (
-        !this._isDecoderReady() &&
-        typeof window.bakend?.nsFactory?.assure_stream_async !== 'function' &&
-        Date.now() - startWait < 4500
-      ) {
-        if (session.aborted) return null;
-        await new Promise(r => setTimeout(r, 30));
-      }
-      if (session.aborted) return null;
-
-      dec = this.decipherSabrUrl(rawUrl);
-      if (!dec && typeof window.bakend?.nsFactory?.assure_stream_async === 'function') {
-        try {
-          const wrappedUrl = rawUrl.includes(`&n=${origN}`)
-            ? rawUrl.replace(`&n=${origN}`, `&n=__DECODE_N_${origN}_DECODED_N__`)
-            : rawUrl.replace(`?n=${origN}`, `?n=__DECODE_N_${origN}_DECODED_N__`).replace(`/n/${origN}`, `/n/__DECODE_N_${origN}_DECODED_N__`);
-          const assured = await Promise.race([
-            window.bakend.nsFactory.assure_stream_async(wrappedUrl),
-            new Promise(r => setTimeout(() => r(null), 4000))
-          ]);
+      if (!session.decipherWaitDone) {
+        session.decipherWaitDone = true;
+        const startWait = Date.now();
+        while (
+          !this._isDecoderReady() &&
+          typeof window.bakend?.nsFactory?.assure_stream_async !== 'function' &&
+          Date.now() - startWait < 4500
+        ) {
           if (session.aborted) return null;
-          if (typeof assured === 'string' && assured.startsWith('https://') && !assured.includes('__DECODE_N_')) {
-            const newN = this._extractOrigN(assured);
-            if (newN && newN !== origN) {
-              dec = assured;
+          await new Promise(r => setTimeout(r, 30));
+        }
+        if (session.aborted) return null;
+
+        dec = this.decipherSabrUrl(rawUrl);
+        if (!dec && typeof window.bakend?.nsFactory?.assure_stream_async === 'function') {
+          try {
+            const wrappedUrl = rawUrl.includes(`&n=${origN}`)
+              ? rawUrl.replace(`&n=${origN}`, `&n=__DECODE_N_${origN}_DECODED_N__`)
+              : rawUrl.replace(`?n=${origN}`, `?n=__DECODE_N_${origN}_DECODED_N__`).replace(`/n/${origN}`, `/n/__DECODE_N_${origN}_DECODED_N__`);
+            const assured = await Promise.race([
+              window.bakend.nsFactory.assure_stream_async(wrappedUrl),
+              new Promise(r => setTimeout(() => r(null), 4000))
+            ]);
+            if (session.aborted) return null;
+            if (typeof assured === 'string' && assured.startsWith('https://') && !assured.includes('__DECODE_N_')) {
+              const newN = this._extractOrigN(assured);
+              if (newN && newN !== origN) {
+                dec = assured;
+              }
             }
-          }
-          if (!dec) {
-            dec = this.decipherSabrUrl(rawUrl);
-          }
-        } catch (e) {}
+            if (!dec) {
+              dec = this.decipherSabrUrl(rawUrl);
+            }
+          } catch (e) {}
+        }
       }
 
       if (dec) {
@@ -2164,6 +2209,7 @@
 
     demuxUmp774(u8) {
       const headersById = new Map();
+      const orderedHeaders = [];
       let nextPlaybackCookie = null;
       let redirectUrl = null;
       let sabrError = null;
@@ -2181,12 +2227,21 @@
           const mh = pbParseMessage(u8, dOff, dOff + pSize);
           if (mh) {
             const hid = Number(mh.get(1)?.[0]?.value ?? 0);
-            const itag = Number(mh.get(3)?.[0]?.value ?? 0);
+            let itag = Number(mh.get(3)?.[0]?.value ?? 0);
+            if (!itag) {
+              const f13 = mh.get(13)?.[0];
+              if (f13 && f13.wireType === 2) {
+                const fmt = pbParseMessage(u8, f13.valueOff, f13.valueOff + f13.valueLen);
+                itag = Number(fmt?.get(1)?.[0]?.value ?? 0);
+              }
+            }
             const isInit = Number(mh.get(8)?.[0]?.value ?? 0) === 1;
             const seq = Number(mh.get(9)?.[0]?.value ?? 0);
             const startMs = Number(mh.get(11)?.[0]?.value ?? 0);
             const durMs = Number(mh.get(12)?.[0]?.value ?? 0);
-            headersById.set(hid, { hid, itag, isInit, seq, startMs, durMs, chunks: [] });
+            const hdr = { hid, itag, isInit, seq, startMs, durMs, chunks: [] };
+            headersById.set(hid, hdr);
+            orderedHeaders.push(hdr);
           }
         } else if (pType === 21) { // Media payload
           const hidV = umpReadVarint(u8, dOff);
@@ -2229,7 +2284,7 @@
       }
 
       const segments = [];
-      for (const h of headersById.values()) {
+      for (const h of orderedHeaders) {
         if (h.itag === 774 && h.chunks.length > 0) {
           segments.push({
             isInit: h.isInit,
@@ -2351,39 +2406,35 @@
       }
       if (session.sourceBuffer.updating || session.appendQueue.length === 0) return;
       if (session.mediaSource.readyState !== 'open' && session.mediaSource.readyState !== 'ended') return;
-      const chunk = IS_FIREFOX ? session.appendQueue[0] : session.appendQueue.shift();
+      const chunk = session.appendQueue[0];
       try {
-        const appended = PlaybackArbiter.appendBuffer(session, chunk, 'ump-pump', { throwOnError: IS_FIREFOX });
-        if (IS_FIREFOX) {
-          if (!appended) {
-            session.appendQueue.length = 0;
-            this.stopSession(session);
-            return;
-          }
-          session.appendQueue.shift();
-          session.appendStartedAt = Date.now();
-          session.lastProgressAt = Date.now();
-          session.supplyFailures = 0;
-          session.supplyFailedAt = 0;
-          session.quotaRetries = 0;
-          this._supplyState(session, 'healthy', 'segment-appended');
+        const appended = PlaybackArbiter.appendBuffer(session, chunk, 'ump-pump', { throwOnError: true });
+        if (!appended) {
+          session.appendQueue.length = 0;
+          this.stopSession(session);
+          return;
         }
+        session.appendQueue.shift();
+        session.appendStartedAt = Date.now();
+        session.lastProgressAt = Date.now();
+        session.supplyFailures = 0;
+        session.supplyFailedAt = 0;
+        session.quotaRetries = 0;
+        this._supplyState(session, 'healthy', 'segment-appended');
       } catch (err) {
         console.log(TAG, '[UmpMse774] appendBuffer error:', err);
-        if (IS_FIREFOX) {
-          if (err?.name === 'QuotaExceededError' && (session.quotaRetries || 0) < 2) {
-            session.quotaRetries = (session.quotaRetries || 0) + 1;
-            const cur = getVideoTimeFor(session.videoId);
-            const cut = Math.max(0, cur - 20);
-            const b = session.sourceBuffer.buffered;
-            if (cut > 0 && b.length && b.start(0) < cut) {
-              this._supplyState(session, 'evicting', 'MSE quota: retain pending segment and evict played audio');
-              session.appendStartedAt = Date.now();
-              try { session.sourceBuffer.remove(b.start(0), cut); return; } catch (e) {}
-            }
+        if (err?.name === 'QuotaExceededError' && (session.quotaRetries || 0) < 2) {
+          session.quotaRetries = (session.quotaRetries || 0) + 1;
+          const cur = getVideoTimeFor(session.videoId);
+          const cut = Math.max(0, cur - 20);
+          const b = session.sourceBuffer.buffered;
+          if (cut > 0 && b.length && b.start(0) < cut) {
+            this._supplyState(session, 'evicting', 'MSE quota: retain pending segment and evict played audio');
+            session.appendStartedAt = Date.now();
+            try { session.sourceBuffer.remove(b.start(0), cut); return; } catch (e) {}
           }
-          this._supplyFailure(session, `TV UMP MSE ${err?.name || 'append failed'}`, true);
         }
+        this._supplyFailure(session, `TV UMP MSE ${err?.name || 'append failed'}`, true);
       }
     },
 
@@ -2395,7 +2446,7 @@
         this.stopSession(session);
         return;
       }
-      if (IS_FIREFOX) {
+      {
         const nav = typeof StudioEngine774.navVidNow === 'function' ? StudioEngine774.navVidNow() : null;
         if (nav && nav !== session.videoId) { this.stopSession(session); return; }
         const health = this.getSourceHealth(session.videoId);
@@ -2408,7 +2459,7 @@
           return;
         }
         if (session.inFlight) {
-          if (health.requestAgeMs >= 1500 && health.bufferAheadSec / health.consumptionRate <= 2) this.requestSupply('response-overdue');
+          if (health && health.requestAgeMs >= 1500 && health.bufferAheadSec / health.consumptionRate <= 2) this.requestSupply('response-overdue');
           return;
         }
         if (session.retryAt && Date.now() < session.retryAt) return;
@@ -2479,27 +2530,25 @@
       session.inFlightOwner = inflightOwner;
       const abortCtrl = new AbortController();
       session.abortCtrl = abortCtrl;
-      if (IS_FIREFOX) {
-        session.requestStartedAt = Date.now();
-        session.requestTimedOut = false;
-        this._supplyState(session, 'fetching', 'SABR request');
-      }
+      session.requestStartedAt = Date.now();
+      session.requestTimedOut = false;
+      this._supplyState(session, 'fetching', 'SABR request');
       let responseTimer = null;
 
       try {
-        const health = IS_FIREFOX ? this.getSourceHealth(session.videoId) : null;
+        const health = this.getSourceHealth(session.videoId);
         // Timeout covers decipher, fetch headers AND the response body. With a
         // low buffer, fail visibly inside 2 s; healthy lookahead tolerates 5 s bursts.
-        const budget = health ? Math.max(1500, Math.min(6000, health.bufferAheadSec / health.consumptionRate * 750)) : 0;
-        const timeout = IS_FIREFOX ? new Promise((resolve, reject) => {
+        const budget = health ? Math.max(1500, Math.min(6000, health.bufferAheadSec / health.consumptionRate * 750)) : 1500;
+        const timeout = new Promise((resolve, reject) => {
           session.rejectSupplyRequest = () => reject(Object.assign(new Error('SABR supply deadline'), { name: 'TimeoutError' }));
           responseTimer = setTimeout(() => {
             session.requestTimedOut = true;
             try { abortCtrl.abort(); } catch (e) {}
             reject(Object.assign(new Error('SABR supply deadline'), { name: 'TimeoutError' }));
           }, budget);
-        }) : null;
-        const bounded = promise => timeout ? Promise.race([promise, timeout]) : promise;
+        });
+        const bounded = promise => Promise.race([promise, timeout]);
         const baseUrl = await bounded(this.ensureDecipheredUrl(session));
         if (!baseUrl || session.aborted || reqGen !== session.reqGen) return;
 
@@ -2517,21 +2566,13 @@
         if (session.aborted || reqGen !== session.reqGen) return;
         if (!resp.ok) {
           console.log(TAG, `[UmpMse774] SABR POST HTTP ${resp.status} for ${session.videoId}`);
-          if (IS_FIREFOX) { this._supplyFailure(session, `TV UMP HTTP ${resp.status}`); return; }
-          session.errorCount = (session.errorCount || 0) + 1;
-          if (session.errorCount >= 3) {
-            if (S.operationMode === OP_MODES.HYBRID_HQ && canHybridFailover(session.videoId, 'TVHTML5', 'YTM_HARVESTER')) {
-              handleHybridRuntimeFailover(session.videoId, 'TVHTML5', 'YTM_HARVESTER', `TV UMP HTTP ${resp.status}`);
-              return;
-            }
-            StudioEngine774.stopAndUnmute(`TV UMP HTTP ${resp.status}`);
-          }
+          this._supplyFailure(session, `TV UMP HTTP ${resp.status}`);
           return;
         }
 
         const buf = new Uint8Array(await bounded(resp.arrayBuffer()));
         if (session.aborted || reqGen !== session.reqGen) return;
-        if (IS_FIREFOX) session.responseLatencyMs = Date.now() - session.requestStartedAt;
+        session.responseLatencyMs = Date.now() - session.requestStartedAt;
 
         const demuxed = this.demuxUmp774(buf);
         if (demuxed.nextPlaybackCookie) {
@@ -2540,16 +2581,8 @@
         if (demuxed.redirectUrl) {
           session.redirectCount = (session.redirectCount || 0) + 1;
           if (session.redirectCount > 8) {
-            if (IS_FIREFOX) { this._supplyFailure(session, 'TV UMP Redirect Loop', true); return; }
             console.log(TAG, `[UmpMse774] Too many SabrRedirects (${session.redirectCount}) on ${session.videoId}`);
-            session.errorCount = (session.errorCount || 0) + 1;
-            if (session.errorCount >= 3) {
-              if (S.operationMode === OP_MODES.HYBRID_HQ && canHybridFailover(session.videoId, 'TVHTML5', 'YTM_HARVESTER')) {
-                handleHybridRuntimeFailover(session.videoId, 'TVHTML5', 'YTM_HARVESTER', 'TV UMP Redirect Loop');
-                return;
-              }
-              StudioEngine774.stopAndUnmute('TV UMP Redirect Loop');
-            }
+            this._supplyFailure(session, 'TV UMP Redirect Loop', true);
             return;
           }
           console.log(TAG, `[UmpMse774] Following SabrRedirect #${session.redirectCount} to ${new URL(demuxed.redirectUrl).hostname}...`);
@@ -2564,28 +2597,12 @@
         }
 
         if (demuxed.segments.length === 0) {
-          if (IS_FIREFOX) {
-            const durSec = session.durationSec || (video && video.duration > 0 ? video.duration : 0);
-            if (durSec > 0 && targetMs >= durSec * 1000 - 200 && session.hasInit) {
-              session.reachedEof = true;
-              this._supplyState(session, 'ended', 'known-duration-end');
-            } else {
-              this._supplyFailure(session, demuxed.sabrError ? 'TV UMP SabrError' : 'TV UMP empty response (not EOF)');
-            }
-            return;
-          }
-          if (demuxed.sabrError) {
-            session.errorCount = (session.errorCount || 0) + 1;
-            if (session.errorCount >= 3) {
-              if (S.operationMode === OP_MODES.HYBRID_HQ && canHybridFailover(session.videoId, 'TVHTML5', 'YTM_HARVESTER')) {
-                handleHybridRuntimeFailover(session.videoId, 'TVHTML5', 'YTM_HARVESTER', 'TV UMP SabrError');
-                return;
-              }
-              StudioEngine774.stopAndUnmute('TV UMP SabrError');
-            }
-          } else if (session.hasInit && targetMs > 5000) {
-            // IS_FIREFOX already returned above; on Chromium a zero-segment response past 5s marks EOF.
+          const durSec = session.durationSec || (video && video.duration > 0 ? video.duration : 0);
+          if (durSec > 0 && targetMs >= durSec * 1000 - 200 && session.hasInit) {
             session.reachedEof = true;
+            this._supplyState(session, 'ended', 'known-duration-end');
+          } else {
+            this._supplyFailure(session, demuxed.sabrError ? 'TV UMP SabrError' : 'TV UMP empty response (not EOF)');
           }
           return;
         }
@@ -2604,9 +2621,8 @@
               session.initChannels = initInfo ? initInfo.opusChannels : null;
               console.log(TAG, `[UmpMse774] Queued 774 WebM Init Segment (${seg.data.length}B, opusCh=${initInfo && initInfo.opusChannels}, trackCh=${initInfo && initInfo.trackChannels}, map=${initInfo && initInfo.mappingFamily}) for ${session.videoId}`);
             } else if (initInfo && session.initChannels && initInfo.opusChannels !== session.initChannels) {
-              if (IS_FIREFOX) { this._supplyFailure(session, `TV UMP OpusHead channels changed ${session.initChannels} -> ${initInfo.opusChannels}`, true); return; }
-              // Channel-changing init mid-stream: appending it would downmix silently on Firefox.
-              console.warn(TAG, `[UmpMse774] IGNORED channel-changing init for ${session.videoId}: session=${session.initChannels}ch arrived=${initInfo.opusChannels}ch (${seg.data.length}B)`);
+              this._supplyFailure(session, `TV UMP OpusHead channels changed ${session.initChannels} -> ${initInfo.opusChannels}`, true);
+              return;
             }
           } else {
             if (IS_FIREFOX && session.lastContigEndMs && seg.startMs > session.lastContigEndMs + 200 && seekTarget === null) {
@@ -2636,7 +2652,7 @@
           }
         }
 
-        if (IS_FIREFOX && !queuedMedia && session.appendQueue.length === 0) {
+        if (!queuedMedia && session.appendQueue.length === 0) {
           this._supplyFailure(session, 'TV UMP response made no media progress');
           return;
         }
@@ -2646,9 +2662,9 @@
         if (err?.name !== 'AbortError') {
           console.log(TAG, '[UmpMse774] pump fetch error:', err);
         }
-        if (IS_FIREFOX && !session.aborted && reqGen === session.reqGen && (err?.name !== 'AbortError' || session.requestTimedOut)) {
+        if (!session.aborted && reqGen === session.reqGen && (err?.name !== 'AbortError' || session.requestTimedOut)) {
           const health = this.getSourceHealth(session.videoId);
-          this._supplyFailure(session, `TV UMP ${session.requestTimedOut ? 'response timeout' : 'fetch error'}`, session.requestTimedOut && health.bufferAheadSec / health.consumptionRate <= 2);
+          this._supplyFailure(session, `TV UMP ${session.requestTimedOut ? 'response timeout' : 'fetch error'}`, session.requestTimedOut && health && health.bufferAheadSec / health.consumptionRate <= 2);
         }
       } finally {
         if (responseTimer) clearTimeout(responseTimer);
@@ -2659,7 +2675,7 @@
         if (session.inFlightOwner === inflightOwner) {
           session.inFlight = false;
           session.inFlightOwner = null;
-          if (IS_FIREFOX) session.rejectSupplyRequest = null;
+          session.rejectSupplyRequest = null;
         }
         if (session.abortCtrl === abortCtrl) {
           session.abortCtrl = null;
@@ -2811,10 +2827,8 @@
 
     stopSession(session) {
       if (!session || session.aborted) return;
-      if (IS_FIREFOX) {
-        if (session.supplyState !== 'fallback') this._supplyState(session, 'stopped', 'session-stopped');
-        this.lastSourceHealth = { ...this.getSourceHealth(session.videoId), pumpStopped: true, fetching: false, requestAgeMs: 0, queued: 0 };
-      }
+      if (session.supplyState !== 'fallback') this._supplyState(session, 'stopped', 'session-stopped');
+      this.lastSourceHealth = { ...this.getSourceHealth(session.videoId), pumpStopped: true, fetching: false, requestAgeMs: 0, queued: 0 };
       session.aborted = true;
       if (session.timer) {
         clearInterval(session.timer);
@@ -2829,10 +2843,11 @@
         session.abortCtrl = null;
       }
       session.appendQueue.length = 0;
-      if (IS_FIREFOX) {
-        if (session.rejectSupplyRequest) session.rejectSupplyRequest();
-        session.rejectSupplyRequest = null;
-        if (session.sourceOpenTimer) clearTimeout(session.sourceOpenTimer);
+      if (session.rejectSupplyRequest) session.rejectSupplyRequest();
+      session.rejectSupplyRequest = null;
+      if (session.sourceOpenTimer) {
+        clearTimeout(session.sourceOpenTimer);
+        session.sourceOpenTimer = null;
       }
       if (session.blobUrl) {
         const oldUrl = session.blobUrl;
@@ -2860,7 +2875,7 @@
       if (!videoId || !best774 || !tvCtx?.serverAbrStreamingUrl || !tvCtx?.ustreamerConfig) {
         return false;
       }
-      if (IS_FIREFOX && this.lastSupplyFailure?.videoId === videoId && Date.now() < this.lastSupplyFailure.until &&
+      if (this.lastSupplyFailure?.videoId === videoId && Date.now() < this.lastSupplyFailure.until &&
           this.lastSupplyFailure.context === `${tvCtx.serverAbrStreamingUrl}|${tvCtx.ustreamerConfig}` && !tvCtx.forceFresh) {
         // A periodic badge/quality re-arm must not immediately re-use the exact
         // exhausted SABR context. Fresh supply or the bounded cooldown permits retry.
@@ -2936,17 +2951,18 @@
       };
 
       this.session = session;
-      if (IS_FIREFOX) {
-        this.lastSourceHealth = null;
-        session.lastProgressAt = Date.now();
-        this._supplyState(session, 'attaching', 'sourceopen-pending');
-      }
+      this.lastSourceHealth = null;
+      session.lastProgressAt = Date.now();
+      this._supplyState(session, 'attaching', 'sourceopen-pending');
       this.isActive = true;
       this.videoId = videoId;
 
       mediaSource.addEventListener('sourceopen', () => {
         if (session.aborted || this.session !== session) return;
-        if (IS_FIREFOX && session.sourceOpenTimer) clearTimeout(session.sourceOpenTimer);
+        if (session.sourceOpenTimer) {
+          clearTimeout(session.sourceOpenTimer);
+          session.sourceOpenTimer = null;
+        }
         try {
           if (session.durationSec > 0 && isFinite(session.durationSec)) {
             mediaSource.duration = session.durationSec;
@@ -2957,7 +2973,7 @@
 
           sb.addEventListener('updateend', () => {
             if (session.aborted || this.session !== session) return;
-            if (IS_FIREFOX) session.appendStartedAt = 0;
+            session.appendStartedAt = 0;
             if (session.appendQueue.length > 0) {
               this.flushQueue(session);
               return;
@@ -3014,12 +3030,10 @@
               }
             }
           });
-          if (IS_FIREFOX) {
-            sb.addEventListener('error', () => this._supplyFailure(session, 'TV UMP MSE decode error', true));
-            sb.addEventListener('abort', () => {
-              if (!session.aborted) this._supplyFailure(session, 'TV UMP MSE append aborted', true);
-            });
-          }
+          sb.addEventListener('error', () => this._supplyFailure(session, 'TV UMP MSE decode error', true));
+          sb.addEventListener('abort', () => {
+            if (!session.aborted) this._supplyFailure(session, 'TV UMP MSE append aborted', true);
+          });
 
           this.pump(session);
           // Lever 2: the 400ms timer is only a safety net for missed updateend events; normal
@@ -3032,11 +3046,9 @@
           StudioEngine774.stopAndUnmute('MSE SourceBuffer init failed');
         }
       }, { once: true });
-      if (IS_FIREFOX) {
-        session.sourceOpenTimer = setTimeout(() => {
-          if (!session.sourceBuffer) this._supplyFailure(session, 'TV UMP MSE sourceopen timeout', true);
-        }, 1800);
-      }
+      session.sourceOpenTimer = setTimeout(() => {
+        if (!session.sourceBuffer) this._supplyFailure(session, 'TV UMP MSE sourceopen timeout', true);
+      }, 1800);
 
       const umpFmt = {
         ...best774,
@@ -4388,9 +4400,14 @@
         if (!S.enabled) return;
         if (!e.target || e.target.tagName !== 'VIDEO' || e.target.id === 'ytss-studio-774') return;
         const video = e.target;
-        // Ignore hover thumbnail previews on home/feed pages
-        if (video.closest('ytd-video-preview') || video.closest('ytd-thumbnail')) return;
+        // Ignore hover thumbnail previews and hidden/mockplayer containers (e.g. Vorapis mock_hid)
+        if (isHiddenOrPreviewNode(video)) return;
         if (!video.closest('#movie_player, ytd-miniplayer, .html5-video-player') && !video.classList.contains('html5-main-video')) return;
+        if (typeof PlayerBadgeUI !== 'undefined' &&
+            (e.type === 'loadstart' || e.type === 'loadedmetadata' || e.type === 'canplay' || e.type === 'playing') &&
+            !PlayerBadgeUI.isMountedInActivePlayer()) {
+          PlayerBadgeUI.inject();
+        }
         const curVid = getVideoIdFromUrl();
         if (curVid && confirmedNo774Videos.has(curVid)) {
           if (this.isActive || this._isTransitioning) {
@@ -6304,7 +6321,7 @@
 
       PlaybackArbiter.detach(reason || 'stopAndUnmute');
       if (!isDisabling && !this.isActive && !this._isTransitioning && !this.pending774) {
-        if (IS_FIREFOX && reason) {
+        if (reason) {
           // A stopped pump can reach this branch after it has already detached. Status
           // must still stop claiming 774 and the master must regain its output volume.
           this.restoreNativeVideo(getMainVideoElement());
@@ -7540,85 +7557,42 @@
   // Dynamic structural Protobuf rebuilder for VideoPlaybackAbrRequest (TV Relay mode).
   // Rewrites f16 (preferredAudioFormatIds) and f2 (selectedFormatIds).
   // Returns a new Uint8Array with patches applied, or null.
-  function sabrRewritePreferredAudio(bytes, targetItags, newItag, newLastModified) {
+  function sabrRewritePreferredAudio(bytes, targetItags, newItag, newLastModified, newXtags = null) {
     if (!bytes || bytes.length === 0) return null;
     try {
-      const topFields = pbParseMessage(bytes, 0, bytes.length);
-      if (!topFields) return null;
+      const parsed = pbParseRawFields(bytes, 0, bytes.length);
+      if (!parsed || !parsed.list.length) return null;
 
       const itagList = Array.isArray(targetItags) ? targetItags : [targetItags];
-
-      // ── Patch f16 (preferred audio): rewrite f16.f1 (itag) and f16.f2 (lastModified)
-      const f16Entries = topFields.get(16);
-      if (!f16Entries || f16Entries.length === 0) return null;
-      let f16Target = null, f16Fields = null, f16f1 = null;
-      for (const e of f16Entries) {
-        const ff = pbParseMessage(bytes, e.valueOff, e.valueOff + e.valueLen);
-        if (!ff) continue;
-        const f1 = ff.get(1)?.[0];
-        if (f1 && f1.wireType === 0 && itagList.includes(Number(f1.value))) {
-          f16Target = e;
-          f16Fields = ff;
-          f16f1 = f1;
-          break;
-        }
-      }
-      if (!f16Target || !f16f1) return null;
-
-      const oldItag = Number(f16f1.value);
-
-      // ── Patch f2 (selected format): find the entry whose f1 === oldItag
-      const f2Entries = topFields.get(2);
-      let f2Target = null, f2Fields = null, f2f1 = null, f2f2 = null;
-      if (f2Entries) {
-        for (const e of f2Entries) {
-          const ff = pbParseMessage(bytes, e.valueOff, e.valueOff + e.valueLen);
-          if (!ff) continue;
-          const f1 = ff.get(1)?.[0];
-          if (f1 && f1.wireType === 0 && Number(f1.value) === oldItag) {
-            f2Target = e; f2Fields = ff; f2f1 = f1; f2f2 = ff.get(2)?.[0];
+      let matchedItag = null;
+      for (const f of parsed.list) {
+        if (f.fn === 16 && f.wireType === 2) {
+          const ff = pbParseMessage(bytes, f.valueOff, f.nextOff);
+          const f1 = ff?.get(1)?.[0];
+          if (f1 && f1.wireType === 0 && itagList.includes(Number(f1.value))) {
+            matchedItag = Number(f1.value);
             break;
           }
         }
       }
+      if (matchedItag === null) return null;
 
-      // Build the patched buffer. Both oldItag and newItag must be 2-byte varints
-      // so the enclosing length prefix is unchanged.
-      const oldItagBytes = pbEncodeVarint(oldItag);
-      const newItagBytes = pbEncodeVarint(newItag);
-      if (oldItagBytes.length !== newItagBytes.length) {
-        return null;
-      }
-
-      // Start from a copy.
-      const out = new Uint8Array(bytes);
-
-      // Rewrite f16.f1 (itag) in place — same byte count.
-      out[f16f1.valueOff] = newItagBytes[0];
-      out[f16f1.valueOff + 1] = newItagBytes[1];
-
-      // Rewrite f16.f2 (lastModified) if present and byte length matches
-      const f16f2 = f16Fields.get(2)?.[0];
-      if (f16f2 && f16f2.wireType === 0 && newLastModified) {
-        const newLmBytes = pbEncodeVarint(BigInt(newLastModified));
-        if (newLmBytes.length === f16f2.valueLen) {
-          for (let i = 0; i < newLmBytes.length; i++) out[f16f2.valueOff + i] = newLmBytes[i];
-        }
-      }
-
-      // Rewrite f2 entry (selected format) if found.
-      if (f2Target && f2f1) {
-        out[f2f1.valueOff] = newItagBytes[0];
-        out[f2f1.valueOff + 1] = newItagBytes[1];
-        if (f2f2 && f2f2.wireType === 0 && newLastModified) {
-          const newLmBytes = pbEncodeVarint(BigInt(newLastModified));
-          if (newLmBytes.length === f2f2.valueLen) {
-            for (let i = 0; i < newLmBytes.length; i++) out[f2f2.valueOff + i] = newLmBytes[i];
+      const outChunks = [];
+      let modified = false;
+      for (const f of parsed.list) {
+        if ((f.fn === 16 || f.fn === 2) && f.wireType === 2) {
+          const matchList = f.fn === 16 ? itagList : [matchedItag];
+          const rebuilt = pbRebuildFormatIdIfMatched(bytes, f.valueOff, f.nextOff, matchList, newItag, newLastModified, newXtags);
+          if (rebuilt) {
+            outChunks.push(pbWrapLengthDelimited(f.fn, rebuilt));
+            modified = true;
+            continue;
           }
         }
+        outChunks.push(bytes.subarray(f.tagOff, f.nextOff));
       }
 
-      return out;
+      return modified ? pbConcatChunks(outChunks) : null;
     } catch (e) {
       console.warn(TAG, '[SabrRewrite] sabrRewritePreferredAudio error:', e);
       return null;
@@ -7646,10 +7620,11 @@
       bytes,
       [251],
       774,
-      sabrRewrite.lastModified || 0
+      sabrRewrite.lastModified || 0,
+      sabrRewrite.xtags || null
     );
     if (patched && patched !== bytes) {
-      console.log(TAG, `[SabrRewrite] SABR body rewritten in-place: itag 251→774 (${bytes.length}B)`);
+      console.log(TAG, `[SabrRewrite] SABR body rewritten in-place: itag 251→774 (${bytes.length}B -> ${patched.length}B)`);
       return patched;
     }
     return null;
@@ -7699,10 +7674,10 @@
     let foundAudioDecision = false;
 
     while (off < u8.length) {
-      const typeV = pbReadVarint(u8, off);
+      const typeV = umpReadVarint(u8, off);
       if (!typeV) break;
       const partType = Number(typeV[0]);
-      const sizeV = pbReadVarint(u8, typeV[1]);
+      const sizeV = umpReadVarint(u8, typeV[1]);
       if (!sizeV) break;
       const partSize = Number(sizeV[0]);
       const dataOff = sizeV[1];
@@ -7816,6 +7791,11 @@
       }
       const audioRow = document.getElementById('ytss-sfn-audio-row');
       if (audioRow) audioRow.remove();
+      const panel = document.getElementById('ytss-sfn');
+      if (panel) panel.remove();
+      const classicPanel = document.getElementById('ytss-classic-sfn');
+      if (classicPanel) classicPanel.remove();
+      this.visible = false;
       this.initialized = false;
     },
 
@@ -8089,8 +8069,7 @@
     },
 
     hostEl() {
-      return document.querySelector('.html5-video-player')
-        || document.getElementById('movie_player')
+      return getActivePlayerRoot()
         || document.querySelector('video.html5-main-video')?.parentElement;
     },
 
@@ -8132,32 +8111,34 @@
       // Classic frame/bytes table
       const table = document.createElement('table');
       table.style.cssText = 'width:100%;border-collapse:collapse;margin-top:6px;font-size:10px;';
-      table.innerHTML = this.toSafeHtml([
-        '<tr>',
-        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Decoded Frames</th>',
-        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Dropped Frames</th>',
-        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Parsed Frames</th>',
-        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Presented Frames</th>',
-        '</tr>',
-        '<tr id="ytss-sfn-frames">',
-        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
-        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
-        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
-        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
-        '</tr>',
-        '<tr>',
-        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Video Bytes Decoded</th>',
-        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Audio Bytes Decoded</th>',
-        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Painted Frames</th>',
-        '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Paint Delay</th>',
-        '</tr>',
-        '<tr id="ytss-sfn-bytes">',
-        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
-        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
-        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
-        '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
-        '</tr>'
-      ].join(''));
+      try {
+        table.innerHTML = this.toSafeHtml([
+          '<tr>',
+          '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Decoded Frames</th>',
+          '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Dropped Frames</th>',
+          '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Parsed Frames</th>',
+          '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Presented Frames</th>',
+          '</tr>',
+          '<tr id="ytss-sfn-frames">',
+          '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+          '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+          '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+          '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+          '</tr>',
+          '<tr>',
+          '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Video Bytes Decoded</th>',
+          '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Audio Bytes Decoded</th>',
+          '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Painted Frames</th>',
+          '<th style="border:1px solid #666;background:#3a1515;color:#ffb84d;padding:2px 4px;">Paint Delay</th>',
+          '</tr>',
+          '<tr id="ytss-sfn-bytes">',
+          '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+          '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+          '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+          '<td style="border:1px solid #666;padding:2px 4px;text-align:center;">-</td>',
+          '</tr>'
+        ].join(''));
+      } catch (e) {}
       panel.appendChild(table);
 
       if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
@@ -8367,6 +8348,15 @@
       }
     },
 
+    teardown() {
+      if (this.panel) {
+        try { this.panel.remove(); } catch (e) {}
+        this.panel = null;
+      }
+      this.refs = null;
+      this.isOpen = false;
+    },
+
     injectStyles() {
       if (document.getElementById('ytss-inplayer-style')) return;
       const st = document.createElement('style');
@@ -8391,7 +8381,11 @@
 
     createPanel() {
       const existing = document.getElementById('ytss-quick-settings');
-      if (existing) { this.panel = existing; return; }
+      if (existing && existing.querySelector('#ytss-panel-close') && this.refs) {
+        this.panel = existing;
+        return;
+      }
+      if (existing) existing.remove();
 
       const panel = document.createElement('div');
       panel.id = 'ytss-quick-settings';
@@ -8571,7 +8565,7 @@
 
     attachToPlayer() {
       if (!this.panel) return;
-      const player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+      const player = getActivePlayerRoot();
       if (player && this.panel.parentElement !== player) {
         if (getComputedStyle(player).position === 'static') player.style.position = 'relative';
         player.appendChild(this.panel);
@@ -8622,7 +8616,7 @@
 
     position() {
       if (!this.panel) return;
-      const player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+      const player = getActivePlayerRoot();
       const container = document.getElementById('ytss-badge-bar') || document.getElementById('ytss-vol-container');
       if (!player) return;
       if (container) {
@@ -8800,19 +8794,26 @@
 
     const audioOnlyBtn = document.getElementById('ytss-audio-only-btn');
     if (audioOnlyBtn) {
-      if (S.audioOnly && S.enabled) {
-        audioOnlyBtn.style.color = '#00e5ff';
-        audioOnlyBtn.style.borderColor = 'rgba(0,229,255,0.55)';
-        audioOnlyBtn.style.background = 'rgba(0, 229, 255, 0.12)';
-        audioOnlyBtn.style.boxShadow = 'none';
-        audioOnlyBtn.title = t('hudAudioOnlyOn');
-      } else {
-        // Same chip as the codec badge; cyan tint kept for the headphone glyph
-        audioOnlyBtn.style.color = 'rgba(0,229,255,0.85)';
-        audioOnlyBtn.style.borderColor = 'rgba(0,229,255,0.35)';
-        audioOnlyBtn.style.background = 'transparent';
-        audioOnlyBtn.style.boxShadow = 'none';
-        audioOnlyBtn.title = t('hudAudioOnlyOff');
+      const aoActive = !!(S.audioOnly && S.enabled);
+      const isV3Btn = !!(audioOnlyBtn.parentElement && audioOnlyBtn.parentElement.id === 'ytss-bar-group');
+      const title = t(aoActive ? 'hudAudioOnlyOn' : 'hudAudioOnlyOff');
+      const sig = (aoActive ? '1:' : '0:') + (isV3Btn ? 'v3:' : 'm:') + title;
+      if (audioOnlyBtn._ytssAoSig !== sig) {
+        audioOnlyBtn._ytssAoSig = sig;
+        if (aoActive) {
+          audioOnlyBtn.style.color = '#00e5ff';
+          audioOnlyBtn.style.borderColor = 'rgba(0,229,255,0.55)';
+          audioOnlyBtn.style.background = 'rgba(0, 229, 255, 0.12)';
+          audioOnlyBtn.style.boxShadow = 'none';
+          audioOnlyBtn.title = title;
+        } else {
+          // Same chip as the codec badge; cyan tint kept for the headphone glyph
+          audioOnlyBtn.style.color = 'rgba(0,229,255,0.85)';
+          audioOnlyBtn.style.borderColor = 'rgba(0,229,255,0.35)';
+          audioOnlyBtn.style.background = 'transparent';
+          audioOnlyBtn.style.boxShadow = 'none';
+          audioOnlyBtn.title = title;
+        }
       }
     }
   }
@@ -8850,15 +8851,26 @@
         return;
       }
 
-      this.injectControlBarBadge();
-      // Modern YouTube fallback only if V3 chrome badge not present
-      if (!document.getElementById('ytss-badge-bar')) this.injectInControls();
-      this.update();
+      this._injecting = true;
+      try {
+        const chrome = getVisibleV3Chrome();
+        if (chrome) {
+          // Clear any modern container/badge (e.g. leaked into hidden Kevlar mockplayer)
+          document.getElementById('ytss-vol-container')?.remove();
+          document.getElementById('ytss-badge')?.remove();
+          this.injectControlBarBadge(chrome);
+        } else {
+          this.injectInControls();
+        }
+        this.update();
+      } finally {
+        this._injecting = false;
+      }
     },
 
     // V3: chip immediately after the time display (0:12 / 2:59)
-    injectControlBarBadge() {
-      const chrome = document.querySelector('.html5-player-chrome');
+    injectControlBarBadge(chromeArg) {
+      const chrome = chromeArg || getVisibleV3Chrome();
       if (!chrome) return;
 
       document.getElementById('ytss-badge-under')?.remove();
@@ -8875,12 +8887,12 @@
         group = document.createElement('div');
         group.id = 'ytss-bar-group';
         group.style.cssText = 'display:inline-flex;align-items:center;height:28px;margin:0 0 0 14px;vertical-align:middle;flex:0 0 auto;position:relative;z-index:11;user-select:none;';
-      } else {
+      } else if (group.style.display !== 'inline-flex') {
         group.style.display = 'inline-flex';
       }
 
       let badge = document.getElementById('ytss-badge-bar');
-      if (!badge || badge.parentElement !== group) {
+      if (!badge) {
         badge = document.createElement('span');
         badge.id = 'ytss-badge-bar';
         badge.className = 'ytss-bar-badge';
@@ -8890,69 +8902,89 @@
           e.stopPropagation();
           InPlayerSettingsUI.toggle();
         });
+      }
+      if (!badge.style.height) {
+        // Match .ytp-time-display (line-height: 28px) so centers line up
+        badge.style.cssText = [
+          'display:inline-flex',
+          'align-items:center',
+          'justify-content:center',
+          'height:28px',
+          'line-height:28px',
+          'padding:0 5px',
+          'margin:0',
+          'box-sizing:border-box',
+          'background:transparent',
+          'border:1px solid rgba(225,29,29,0.5)',
+          'border-radius:2px',
+          'font:700 10px/28px Arial,Helvetica,sans-serif',
+          'letter-spacing:0.2px',
+          'color:#e85a5a',
+          'cursor:pointer',
+          'white-space:nowrap',
+          'flex:0 0 auto'
+        ].join(';');
+        delete badge._ytssPaintSig;
+      }
+      if (badge.parentElement !== group) {
         group.appendChild(badge);
       }
 
-      // Match .ytp-time-display (line-height: 28px) so centers line up
-      badge.style.cssText = [
-        'display:inline-flex',
-        'align-items:center',
-        'justify-content:center',
-        'height:28px',
-        'line-height:28px',
-        'padding:0 5px',
-        'margin:0',
-        'box-sizing:border-box',
-        'background:transparent',
-        'border:1px solid rgba(225,29,29,0.5)',
-        'border-radius:2px',
-        'font:700 10px/28px Arial,Helvetica,sans-serif',
-        'letter-spacing:0.2px',
-        'color:#e85a5a',
-        'cursor:pointer',
-        'white-space:nowrap',
-        'flex:0 0 auto'
-      ].join(';');
-
       // Audio-Only pill — always sibling of the badge inside the same group
       let aoBtn = document.getElementById('ytss-audio-only-btn');
-      if (!aoBtn || aoBtn.parentElement !== group) {
+      if (!aoBtn || !aoBtn.querySelector('svg')) {
         if (aoBtn) aoBtn.remove();
         aoBtn = document.createElement('div');
         aoBtn.id = 'ytss-audio-only-btn';
         aoBtn.setAttribute('role', 'button');
         aoBtn.setAttribute('aria-label', 'Audio-Only Mode');
-        // Headphone icon (currentColor) — cyan accent like stock YT control
-        aoBtn.innerHTML = StatsForNerdsSpoofer.toSafeHtml('<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3a9 9 0 0 0-9 9v7a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2H5v-1a7 7 0 0 1 14 0v1h-2a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-7a9 9 0 0 0-9-9z"/></svg>');
+        // Headphone icon (currentColor) — cyan accent like stock YT control (no innerHTML / TrustedHTML risk)
+        const svgNs = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(svgNs, 'svg');
+        svg.setAttribute('width', '15');
+        svg.setAttribute('height', '15');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('fill', 'currentColor');
+        svg.setAttribute('aria-hidden', 'true');
+        const path = document.createElementNS(svgNs, 'path');
+        path.setAttribute('d', 'M12 3a9 9 0 0 0-9 9v7a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2H5v-1a7 7 0 0 1 14 0v1h-2a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-7a9 9 0 0 0-9-9z');
+        svg.appendChild(path);
+        aoBtn.appendChild(svg);
         aoBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           toggleAudioOnly();
         });
+      }
+      if (!aoBtn.style.width) {
+        // Base look = same chip geometry as the codec badge (2px radius / 28px / 1px border)
+        aoBtn.style.cssText = [
+          'display:inline-flex',
+          'align-items:center',
+          'justify-content:center',
+          'height:28px',
+          'line-height:28px',
+          'width:30px',
+          'margin:0 0 0 4px',
+          'padding:0 4px',
+          'box-sizing:border-box',
+          'background:transparent',
+          'border:1px solid rgba(0,229,255,0.5)',
+          'border-radius:2px',
+          'color:#00e5ff',
+          'cursor:pointer',
+          'flex:0 0 auto',
+          'transition:color 0.2s,border-color 0.2s,background 0.2s,box-shadow 0.2s'
+        ].join(';');
+        delete aoBtn._ytssAoSig;
+      }
+      if (aoBtn.parentElement !== group) {
+        delete aoBtn._ytssAoSig;
         group.appendChild(aoBtn);
       }
-      // Base look = same chip geometry as the codec badge (2px radius / 28px / 1px border)
-      aoBtn.style.cssText = [
-        'display:inline-flex',
-        'align-items:center',
-        'justify-content:center',
-        'height:28px',
-        'line-height:28px',
-        'width:30px',
-        'margin:0 0 0 4px',
-        'padding:0 4px',
-        'box-sizing:border-box',
-        'background:transparent',
-        'border:1px solid rgba(0,229,255,0.5)',
-        'border-radius:2px',
-        'color:#00e5ff',
-        'cursor:pointer',
-        'flex:0 0 auto',
-        'transition:color 0.2s,border-color 0.2s,background 0.2s,box-shadow 0.2s'
-      ].join(';');
 
       // Keep group anchored right after the time display
       if (time && time.parentElement) {
-        if (group.previousElementSibling !== time) {
+        if (group.parentElement !== time.parentElement || group.previousElementSibling !== time) {
           time.insertAdjacentElement('afterend', group);
         }
       } else if (group.parentElement !== left) {
@@ -8961,73 +8993,78 @@
     },
 
     hostEl() {
-      return document.querySelector('.html5-video-player')
-        || document.getElementById('movie_player')
+      return getActivePlayerRoot()
         || document.querySelector('video.html5-main-video')?.parentElement;
     },
 
     // Modern YouTube: keep pill inside control bar when those exist
     injectInControls() {
-      const settingsBtn = document.querySelector('.ytp-settings-button');
-      const subBtn = document.querySelector('.ytp-subtitles-button');
-      const rcLeft = document.querySelector('.ytp-right-controls-left');
-      const rightControls = rcLeft || document.querySelector('.ytp-right-controls') || document.querySelector('.ytp-left-controls');
+      const playerRoot = getActivePlayerRoot();
+      if (!playerRoot || playerRoot.querySelector('.html5-player-chrome')) return;
+
+      const settingsBtn = playerRoot.querySelector('.ytp-settings-button');
+      const subBtn = playerRoot.querySelector('.ytp-subtitles-button');
+      const rcLeft = playerRoot.querySelector('.ytp-right-controls-left');
+      const rightControls = rcLeft || playerRoot.querySelector('.ytp-right-controls') || playerRoot.querySelector('.ytp-left-controls');
       if (!rightControls) return;
 
+      // Clear stale V3 chrome group only after confirming modern player controls exist
+      document.getElementById('ytss-bar-group')?.remove();
+      document.getElementById('ytss-badge-bar')?.remove();
+
+      const targetParent = (settingsBtn && settingsBtn.parentElement && playerRoot.contains(settingsBtn.parentElement))
+        ? settingsBtn.parentElement
+        : ((subBtn && subBtn.parentElement && playerRoot.contains(subBtn.parentElement))
+          ? subBtn.parentElement
+          : rightControls);
+
       let container = document.getElementById('ytss-vol-container');
-      if (!container || !rightControls.contains(container)) {
-        if (!container) {
-          container = document.createElement('div');
-          container.id = 'ytss-vol-container';
-          container.className = 'ytss-controls-container';
-          container.style.cssText = 'display: inline-flex; align-items: center; justify-content: center; position: relative; margin: 0 4px; vertical-align: top; user-select: none; z-index: 999; height: 100%; gap: 5px; width: auto !important; overflow: visible !important;';
-
-          const badge = document.createElement('div');
-          badge.id = 'ytss-badge';
-          badge.title = 'Click: Stats for nerds';
-          badge.style.cssText = 'font-size: 11px; font-weight: 800; color: #ff334b; background: rgba(0,0,0,0.65); padding: 2px 6px; border-radius: 4px; border: 1px solid #ff334b; white-space: nowrap; line-height: 14px; transition: color 0.2s, border-color 0.2s; cursor: pointer;';
-          badge.textContent = '251';
-          badge.addEventListener('click', (e) => {
-            e.stopPropagation();
-            InPlayerSettingsUI.toggle();
-          });
-          container.appendChild(badge);
-
-          const audioOnlyBtn = document.createElement('div');
-          audioOnlyBtn.id = 'ytss-audio-only-btn';
-          audioOnlyBtn.style.cssText = 'font-size: 13px; line-height: 16px; padding: 2px 6px; border-radius: 4px; border: 1px solid #555; background: rgba(0,0,0,0.5); color: #aaa; cursor: pointer; transition: all 0.2s; user-select: none; display: inline-flex; align-items: center; justify-content: center; white-space: nowrap;';
-          audioOnlyBtn.textContent = '🎧';
-          audioOnlyBtn.title = 'Audio-Only Mode';
-          audioOnlyBtn.onclick = (e) => {
-            e.stopPropagation();
-            toggleAudioOnly();
-          };
-          container.appendChild(audioOnlyBtn);
-        }
-
-        if (settingsBtn && settingsBtn.parentElement) {
-          settingsBtn.parentElement.insertBefore(container, settingsBtn);
-        } else if (subBtn && subBtn.parentElement) {
-          subBtn.parentElement.insertBefore(container, subBtn);
-        } else {
-          rightControls.insertBefore(container, rightControls.firstChild);
-        }
-      } else {
+      if (!container) {
+        container = document.createElement('div');
+        container.id = 'ytss-vol-container';
         container.className = 'ytss-controls-container';
         container.style.cssText = 'display: inline-flex; align-items: center; justify-content: center; position: relative; margin: 0 4px; vertical-align: top; user-select: none; z-index: 999; height: 100%; gap: 5px; width: auto !important; overflow: visible !important;';
+      }
 
-        let audioOnlyBtn = document.getElementById('ytss-audio-only-btn');
-        if (!audioOnlyBtn && container) {
-          audioOnlyBtn = document.createElement('div');
-          audioOnlyBtn.id = 'ytss-audio-only-btn';
-          audioOnlyBtn.style.cssText = 'font-size: 13px; line-height: 16px; padding: 2px 6px; border-radius: 4px; border: 1px solid #555; background: rgba(0,0,0,0.5); color: #aaa; cursor: pointer; transition: all 0.2s; user-select: none; display: inline-flex; align-items: center; justify-content: center; white-space: nowrap;';
-          audioOnlyBtn.textContent = '🎧';
-          audioOnlyBtn.title = 'Audio-Only Mode';
-          audioOnlyBtn.onclick = (e) => {
-            e.stopPropagation();
-            toggleAudioOnly();
-          };
-          container.appendChild(audioOnlyBtn);
+      let badge = document.getElementById('ytss-badge');
+      if (!badge || badge.parentElement !== container) {
+        if (badge) badge.remove();
+        badge = document.createElement('div');
+        badge.id = 'ytss-badge';
+        badge.title = 'Click: Stats for nerds';
+        badge.style.cssText = 'font-size: 11px; font-weight: 800; color: #ff334b; background: rgba(0,0,0,0.65); padding: 2px 6px; border-radius: 4px; border: 1px solid #ff334b; white-space: nowrap; line-height: 14px; transition: color 0.2s, border-color 0.2s; cursor: pointer;';
+        badge.textContent = '251';
+        badge.addEventListener('click', (e) => {
+          e.stopPropagation();
+          InPlayerSettingsUI.toggle();
+        });
+        delete badge._ytssPaintSig;
+        container.insertBefore(badge, container.firstChild);
+      }
+
+      let audioOnlyBtn = document.getElementById('ytss-audio-only-btn');
+      if (!audioOnlyBtn || audioOnlyBtn.parentElement !== container) {
+        if (audioOnlyBtn) audioOnlyBtn.remove();
+        audioOnlyBtn = document.createElement('div');
+        audioOnlyBtn.id = 'ytss-audio-only-btn';
+        audioOnlyBtn.style.cssText = 'font-size: 13px; line-height: 16px; padding: 2px 6px; border-radius: 4px; border: 1px solid #555; background: rgba(0,0,0,0.5); color: #aaa; cursor: pointer; transition: all 0.2s; user-select: none; display: inline-flex; align-items: center; justify-content: center; white-space: nowrap;';
+        audioOnlyBtn.textContent = '🎧';
+        audioOnlyBtn.title = 'Audio-Only Mode';
+        audioOnlyBtn.onclick = (e) => {
+          e.stopPropagation();
+          toggleAudioOnly();
+        };
+        delete audioOnlyBtn._ytssAoSig;
+        container.appendChild(audioOnlyBtn);
+      }
+
+      if (container.parentElement !== targetParent) {
+        if (settingsBtn && settingsBtn.parentElement === targetParent) {
+          targetParent.insertBefore(container, settingsBtn);
+        } else if (subBtn && subBtn.parentElement === targetParent) {
+          targetParent.insertBefore(container, subBtn);
+        } else {
+          targetParent.insertBefore(container, targetParent.firstChild);
         }
       }
     },
@@ -9059,25 +9096,51 @@
       }
     },
 
+    isMountedInActivePlayer() {
+      const aoBtn = document.getElementById('ytss-audio-only-btn');
+      if (!aoBtn) return false;
+      const chrome = getVisibleV3Chrome();
+      if (chrome) {
+        const group = document.getElementById('ytss-bar-group');
+        const bar = document.getElementById('ytss-badge-bar');
+        const left = chrome.querySelector('.left') || chrome;
+        return !!(group && bar && left.contains(group) && group.contains(bar) && group.contains(aoBtn));
+      }
+      const playerRoot = getActivePlayerRoot();
+      if (playerRoot) {
+        const badge = document.getElementById('ytss-badge');
+        return !!(badge && playerRoot.contains(badge) && playerRoot.contains(aoBtn));
+      }
+      return false;
+    },
+
     // K round (P2.9): the 1 Hz refresh must not write DOM while playback is deliberately
-    // paused or ended. Keep a cheap 10 s presence check so a re-render of the control bar
-    // still gets its badge back, but do not repaint/glue/wake the player during the pause.
+    // paused or ended. Re-inject immediately whenever either button or badge is missing
+    // from the active visible player (e.g. after control bar rebuild or nav transition).
     tick() {
       if (!S.enabled) return;
+      if (!this.isMountedInActivePlayer()) {
+        this._idleTicks = 0;
+        this.inject();
+        return;
+      }
       const st = (typeof PlaybackArbiter !== 'undefined') ? PlaybackArbiter.state : 'DETACHED';
       if (st === 'USER_PAUSED' || st === 'ENDED') {
         this._idleTicks = (this._idleTicks || 0) + 1;
         if (this._idleTicks % 10 !== 0) return;
-        if (document.getElementById('ytss-badge-bar') || document.getElementById('ytss-badge')) return;
-      } else {
-        this._idleTicks = 0;
+        return;
       }
+      this._idleTicks = 0;
       this.inject();
     },
 
     update() {
       if (!S.enabled) {
         this.teardown();
+        return;
+      }
+      if (!this._injecting && !this.isMountedInActivePlayer()) {
+        this.inject();
         return;
       }
       const itag = Number(status.activeAudioItag);
@@ -9092,23 +9155,24 @@
       const miniBar = document.querySelector('.ytdMiniplayerInfoBarContent') || document.querySelector('ytd-miniplayer-info-bar');
       if (miniBar) {
         let miniBadge = document.getElementById('ytss-mini-badge');
-        if (!miniBadge) {
+        if (!miniBadge || miniBadge.parentElement !== miniBar) {
+          if (miniBadge) miniBadge.remove();
           miniBadge = document.createElement('span');
           miniBadge.id = 'ytss-mini-badge';
           miniBadge.style.cssText = 'font-size: 10px; font-weight: 700; margin-left: 6px; padding: 1px 5px; border-radius: 3px; vertical-align: middle; display: inline-block; transition: color 0.2s;';
           miniBar.appendChild(miniBadge);
         }
-        if (isHq) {
-          miniBadge.textContent = itag === 141 ? '★ 141' : '★ 774';
-          miniBadge.style.color = itag === 141 ? '#00e5ff' : '#ff334b';
-          miniBadge.style.background = 'rgba(0,0,0,0.6)';
-          miniBadge.style.border = `1px solid ${itag === 141 ? '#00e5ff' : '#ff334b'}`;
-          miniBadge.style.display = 'inline-block';
-        } else {
-          miniBadge.textContent = '251';
-          miniBadge.style.color = '#aaa';
-          miniBadge.style.background = 'rgba(0,0,0,0.4)';
-          miniBadge.style.border = '1px solid #555';
+        const mText = isHq ? (itag === 141 ? '★ 141' : '★ 774') : '251';
+        const mColor = isHq ? (itag === 141 ? '#00e5ff' : '#ff334b') : '#aaa';
+        const mBg = isHq ? 'rgba(0,0,0,0.6)' : 'rgba(0,0,0,0.4)';
+        const mBorder = isHq ? `1px solid ${itag === 141 ? '#00e5ff' : '#ff334b'}` : '1px solid #555';
+        const mSig = mText + '|' + mColor + '|' + mBorder;
+        if (miniBadge._ytssPaintSig !== mSig || miniBadge.textContent !== mText) {
+          miniBadge._ytssPaintSig = mSig;
+          miniBadge.textContent = mText;
+          miniBadge.style.color = mColor;
+          miniBadge.style.background = mBg;
+          miniBadge.style.border = mBorder;
           miniBadge.style.display = 'inline-block';
         }
       }
@@ -9118,6 +9182,11 @@
   // Snapshot the installed wrappers so a live disable can restore the page's originals and
   // a re-enable can put the hooks back without a reload (adapted from upstream 5468b23).
   const HOOKED_DESCS = {};
+  function snapshotHookedDescs() {
+    for (const t of HOOK_TARGETS) {
+      try { HOOKED_DESCS[t.key] = Object.getOwnPropertyDescriptor(t.obj, t.prop) || null; } catch (e) { HOOKED_DESCS[t.key] = null; }
+    }
+  }
 
   function restorePageHooks() {
     let restored = 0;
@@ -9172,7 +9241,7 @@
     }
   }, true);
 
-  ['DOMContentLoaded', 'yt-navigate-finish', 'yt-page-data-updated'].forEach(evt => {
+  ['DOMContentLoaded', 'yt-navigate-finish', 'yt-page-data-updated', 'V3_NAVITRONIC_FINISHED', 'spfdone'].forEach(evt => {
     document.addEventListener(evt, () => {
       applyAudioOnlyState();
       if (!S.enabled) {
@@ -9233,13 +9302,15 @@
     }
   }, 1000);
 
-  document.addEventListener('yt-navigate-finish', () => {
-    if (!S.enabled) return;
-    setTimeout(() => {
-      if (!isPlayerActiveOnPage() && (StudioEngine774.isActive || StudioEngine774._isTransitioning || StudioEngine774.pending774)) {
-        StudioEngine774.stopAndUnmute('Navigated away from watch page');
-      }
-    }, 200);
+  ['yt-navigate-finish', 'V3_NAVITRONIC_FINISHED'].forEach((evt) => {
+    document.addEventListener(evt, () => {
+      if (!S.enabled) return;
+      setTimeout(() => {
+        if (!isPlayerActiveOnPage() && (StudioEngine774.isActive || StudioEngine774._isTransitioning || StudioEngine774.pending774)) {
+          StudioEngine774.stopAndUnmute('Navigated away from watch page');
+        }
+      }, 200);
+    });
   });
 
   // ─── INTERCEPTORS — fetch & XHR ────────────────────────────────────
@@ -9693,8 +9764,8 @@
   };
 
   // Snapshot every installed wrapper now that fetch/XHR are in place too.
-  for (const t of HOOK_TARGETS) {
-    try { HOOKED_DESCS[t.key] = Object.getOwnPropertyDescriptor(t.obj, t.prop) || null; } catch (e) { HOOKED_DESCS[t.key] = null; }
+  if (S.enabled) {
+    snapshotHookedDescs();
   }
 
   console.log(TAG, 'Injected — Pre-warm + ytplayer.config + ITAG disguise + ForceReload active');

@@ -760,9 +760,9 @@ async function setupStaticRules() {
         responseHeaders: [
           { header: 'Access-Control-Allow-Origin', operation: 'set', value: 'https://www.youtube.com' },
           { header: 'Access-Control-Allow-Credentials', operation: 'set', value: 'true' },
-          { header: 'Access-Control-Allow-Methods', operation: 'set', value: 'GET, HEAD, OPTIONS' },
+          { header: 'Access-Control-Allow-Methods', operation: 'set', value: 'GET, HEAD, OPTIONS, POST' },
           { header: 'Access-Control-Allow-Headers', operation: 'set', value: '*' },
-          { header: 'Access-Control-Expose-Headers', operation: 'set', value: 'Content-Length, Content-Range, Accept-Ranges' }
+          { header: 'Access-Control-Expose-Headers', operation: 'set', value: 'Content-Length, Content-Range, Accept-Ranges, Client-Protocol, Content-Type, X-Bandwidth-Est, X-Bandwidth-Est2, X-Bandwidth-Est3, X-Head-Time-Millis, X-Head-Seqnum, X-Response-Itag, X-Segment-Lmt, X-Walltime-Ms' }
         ]
       },
       condition: {

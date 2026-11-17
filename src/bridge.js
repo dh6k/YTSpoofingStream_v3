@@ -225,10 +225,18 @@ function detectBrowserLang() {
 function pushSettings() {
   chrome.storage.local.get(EXPOSED_SETTINGS, (data) => {
     const settings = pickSettings(data);
-    try {
-      localStorage.setItem('ytss_settings', JSON.stringify(settings));
-    } catch (e) {}
     if (Object.keys(settings).length > 0) {
+      try {
+        let merged = settings;
+        const existingRaw = localStorage.getItem('ytss_settings');
+        if (existingRaw) {
+          const existing = JSON.parse(existingRaw);
+          if (existing && typeof existing === 'object') {
+            merged = { ...existing, ...settings };
+          }
+        }
+        localStorage.setItem('ytss_settings', JSON.stringify(merged));
+      } catch (e) {}
       window.postMessage({ type: 'YTSS_SETTINGS_UPDATE', settings }, '*');
     }
     pushLocaleData(data?.uiLanguage || detectBrowserLang());
