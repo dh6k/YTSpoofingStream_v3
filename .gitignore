@@ -15,7 +15,9 @@ dist-firefox/
 dist-out/
 key.pem
 Vorapis_latest.user.js
+Vorapis2.user.js
 smoke_test.js
 firefox_smoke_test.js
 tmp/
 *.log
+*.jpg
