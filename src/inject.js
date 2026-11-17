@@ -3933,6 +3933,29 @@
       this._isInternalVideoSync = true;
       try { PlaybackArbiter.pauseVideo('pause-for-audio-buffer'); } catch (e) {}
       setTimeout(() => { this._isInternalVideoSync = false; }, 150);
+      // Bounded hold: a slow first SABR round-trip (or a pump in backoff) must never
+      // freeze the watch page forever. If audio has not covered the video position
+      // within the cap, release the picture and let the engine fall back if needed —
+      // the user sees playback (native audio path) instead of a dead player.
+      if (this._startupHoldTimer) clearTimeout(this._startupHoldTimer);
+      this._startupHoldTimer = setTimeout(() => {
+        this._startupHoldTimer = null;
+        if (!this._pausedForAudioBuffer) return;
+        const v = getMainVideoElement();
+        // Audio arrived in the last moment: normal resume path (updateend/canplay) handles it.
+        if (v && this.audio && this.isTimeBuffered(this.audio, v.currentTime)) {
+          this.resumeVideoFromAudioBuffer(v);
+          return;
+        }
+        console.log(TAG, '[StudioEngine774] Audio-buffer hold exceeded cap — resuming video without 774 to avoid a frozen player.');
+        this._pausedForAudioBuffer = false;
+        this._audioWaitStartedAt = 0;
+        if (v && !v.paused) {
+          this._isInternalVideoSync = true;
+          try { PlaybackArbiter.playVideo('hold-cap-release'); } catch (e) {}
+          setTimeout(() => { this._isInternalVideoSync = false; }, 150);
+        }
+      }, 2500);
       return true;
     },
 
@@ -3959,10 +3982,23 @@
     _needsAudioBufferAt(timeSec) {
       if (!this.audio) return false;
       if (this.isTimeBuffered(this.audio, timeSec)) return false;
+      // Only hold the picture when the UMP session can actually deliver: a dead
+      // session (aborted / no sourceBuffer) must not freeze the player — the
+      // normal engine paths will replace the source instead.
+      const sess = UmpMseController774.session;
+      if (UmpMseController774.isActive && (!sess || sess.aborted || !sess.sourceBuffer)) return false;
+      // First SABR round-trip after attach is ALWAYS empty (no cluster appended yet).
+      // Holding the video during that window turned startup into "video refuses to
+      // autoplay" — the hold released only after updateend, which for a slow first
+      // POST could take seconds. Give the session a short grace window to land its
+      // first cluster; before the window elapses, let the video start silently.
+      if (sess && this._appliedAt && Date.now() - this._appliedAt < 700 && !sess.hasInit && !sess.inFlight && !sess.appendQueue.length) {
+        return false;
+      }
       return this.audio.readyState < 3 ||
-        Boolean(UmpMseController774.session?.inFlight) ||
+        Boolean(sess?.inFlight) ||
         (UmpMseController774.isActive &&
-          UmpMseController774.getBufferedEndFor(UmpMseController774.session?.sourceBuffer, timeSec) === null);
+          UmpMseController774.getBufferedEndFor(sess?.sourceBuffer, timeSec) === null);
     },
 
     // Bidirectional clock alignment that locks audio<->video after playback
@@ -4006,11 +4042,20 @@
         return;
       }
 
-      const recentSeek = (now - (this._lastSeekTime || 0)) < 35000;
+      // Post-initial alignment window: 6s (not 35s) — a long window made every
+      // transient drift in half a minute eligible for an immediate hard seek,
+      // which listeners experienced as periodic micro-jumps ("weird audio").
+      // Outside this window the 750ms drift controller (rate-convergence) owns
+      // resync, which is inaudible by design.
+      const recentSeek = (now - (this._lastSeekTime || 0)) < 6000;
       if (recentSeek && diff > 0.25 && (!this._lastAudioSeekAlignAt || now - this._lastAudioSeekAlignAt > 800) && this.isTimeBuffered(this.audio, vTime)) {
         this._lastAudioSeekAlignAt = now;
         PlaybackArbiter.seekAudio(vTime, 'align-clock-audio', { forceOwner: true });
-      } else if (diff > 0.25 && (!recentSeek || diff <= 3.0) && this.isTimeBuffered(video, aTime)) {
+      } else if (diff > 0.25 && diff <= 1.2 && (!recentSeek || diff <= 3.0) && this.isTimeBuffered(video, aTime)) {
+        // Only correct the VIDEO towards audio for small residual drift after the
+        // initial snap; larger mismatches are audio-side (seekAudio) or handled by
+        // the drift controller. Hard-seeking the picture mid-play for big diffs was
+        // the source of audible glitches.
         this._isInternalVideoSync = true;
         PlaybackArbiter.seekPlayer(aTime, 'align-clock-video');
         setTimeout(() => { this._isInternalVideoSync = false; }, 250);
@@ -4021,6 +4066,10 @@
       if (!this._pausedForAudioBuffer) return false;
       this._pausedForAudioBuffer = false;
       this._audioWaitStartedAt = 0;
+      if (this._startupHoldTimer) {
+        clearTimeout(this._startupHoldTimer);
+        this._startupHoldTimer = null;
+      }
       if (!video || video.paused || this._userPaused || this._trackEnded || video.ended || this.isAdActive()) {
         return false;
       }
