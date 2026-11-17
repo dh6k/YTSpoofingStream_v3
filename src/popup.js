@@ -1,4 +1,4 @@
-// ytsSpoofingstream (vorapis edition) v0.2.7.5 — Popup Controller
+// ytsSpoofingstream (vorapis edition) v0.2.7.6 — Popup Controller
 (function () {
   'use strict';
 

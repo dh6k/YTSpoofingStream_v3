@@ -4024,20 +4024,20 @@
           if (audioSettled) this._initialSyncDone = true;
           return;
         }
-        if (audioSettled) {
+        // STARTUP ALIGNMENT — the video is the master clock and stays untouched.
+        // The first SABR round-trip regularly lands while the picture is already
+        // 0.5-2.5s ahead, so the old initial branch seeked the VIDEO back to the
+        // audio: the picture visibly yanked at the start of nearly every track
+        // ("stutter / weird audio at track start"). Only the audio slave may be
+        // aligned, exactly once, with the buffer covering the target; otherwise
+        // close the initial window once audio has settled.
+        if (diff > 0.25 && this.isTimeBuffered(this.audio, vTime)) {
           this._initialSyncDone = true;
-        }
-        if ((audioSettled || diff > 0.45) && diff <= 2.5 && this.isTimeBuffered(video, aTime)) {
-          this._lastSeekTime = now;
-          this._isInternalVideoSync = true;
-          PlaybackArbiter.seekPlayer(aTime, 'align-clock-video');
-          setTimeout(() => { this._isInternalVideoSync = false; }, 300);
-          return;
-        }
-        if (diff > 0.40 && (!this._lastAudioSeekAlignAt || now - this._lastAudioSeekAlignAt > 800) && this.isTimeBuffered(this.audio, vTime)) {
           this._lastSeekTime = now;
           this._lastAudioSeekAlignAt = now;
           PlaybackArbiter.seekAudio(vTime, 'align-clock-audio', { forceOwner: true });
+        } else if (audioSettled) {
+          this._initialSyncDone = true;
         }
         return;
       }
@@ -4045,20 +4045,14 @@
       // Post-initial alignment window: 6s (not 35s) — a long window made every
       // transient drift in half a minute eligible for an immediate hard seek,
       // which listeners experienced as periodic micro-jumps ("weird audio").
-      // Outside this window the 750ms drift controller (rate-convergence) owns
-      // resync, which is inaudible by design.
+      // Audio-side only: the master picture is never seeked here; residual drift
+      // beyond the window is owned by the 750ms drift controller (rate
+      // convergence) and the watchdog slave/hard resyncs, which are inaudible
+      // or bounded by design.
       const recentSeek = (now - (this._lastSeekTime || 0)) < 6000;
       if (recentSeek && diff > 0.25 && (!this._lastAudioSeekAlignAt || now - this._lastAudioSeekAlignAt > 800) && this.isTimeBuffered(this.audio, vTime)) {
         this._lastAudioSeekAlignAt = now;
         PlaybackArbiter.seekAudio(vTime, 'align-clock-audio', { forceOwner: true });
-      } else if (diff > 0.25 && diff <= 1.2 && (!recentSeek || diff <= 3.0) && this.isTimeBuffered(video, aTime)) {
-        // Only correct the VIDEO towards audio for small residual drift after the
-        // initial snap; larger mismatches are audio-side (seekAudio) or handled by
-        // the drift controller. Hard-seeking the picture mid-play for big diffs was
-        // the source of audible glitches.
-        this._isInternalVideoSync = true;
-        PlaybackArbiter.seekPlayer(aTime, 'align-clock-video');
-        setTimeout(() => { this._isInternalVideoSync = false; }, 250);
       }
     },
 
@@ -4164,7 +4158,14 @@
           if (this._pausedForAudioBuffer) {
             const video = getMainVideoElement();
             if (video && this.isTimeBuffered(this.audio, video.currentTime)) {
-              if (Math.abs(this.audio.currentTime - video.currentTime) > 0.04) {
+              // Release the held picture as soon as audio covers its position.
+              // Audio self-alignment here must tolerate the normal startup residual
+              // (the picture advanced during the first SABR round-trip): the old
+              // 40ms threshold re-seeked ALREADY-PLAYING audio on every canplay
+              // event, which surfaced as stutter right at the start of tracks.
+              // seekAudio inside the release is audio-side only, and only when
+              // the residual is larger than what the drift controller smooths.
+              if (!this.audio.paused && Math.abs(this.audio.currentTime - video.currentTime) > 0.25) {
                 PlaybackArbiter.seekAudio(video.currentTime, 'audio-buffer-ready-align', { forceOwner: true });
               }
               if (this.audio.paused && !this._userPaused) {
