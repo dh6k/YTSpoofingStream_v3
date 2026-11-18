@@ -429,7 +429,7 @@
       if (isFirefox) notifyAbort(cached774Metadata ? 'DECIPHER_FAILED' : 'HARVEST_TIMEOUT');
       else haltPlayback();
     }
-  }, isFirefox ? 1700 : 8000);
+  }, isFirefox ? 4500 : 8000);
 
   if (isFirefox) {
     // A new base.js/CSP failure is recoverable supply failure, not NO_774.

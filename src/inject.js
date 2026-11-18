@@ -984,7 +984,7 @@
         window.removeEventListener('message', onMessage);
         resolve({ results: [], streamingContext: null, error: 'HARVEST_TIMEOUT',
           supplyStatus: IS_FIREFOX ? { route: 'YTM_HARVESTER', code: 'BRIDGE_TIMEOUT', action: 'fallback', recoverable: true } : null });
-      }, IS_FIREFOX ? 2000 : 12000);
+      }, IS_FIREFOX ? 7500 : 12000);
     });
   }
 
@@ -1883,6 +1883,7 @@
         }
         session.supplySample = { at: now, ahead };
       }
+      const trulyAtEof = Boolean(session.reachedEof && (!session.durationSec || (end !== null && end >= session.durationSec - 2.0)));
       return {
         source: 'TVHTML5', route: 'UMP', videoId: session.videoId,
         state: session.aborted ? 'stopped' : (session.supplyState || (session.inFlight ? 'fetching' : 'healthy')),
@@ -1895,7 +1896,7 @@
         fetching: !!session.inFlight,
         // reachedEof with buffered 774 remaining is a normal end-of-track state, not a dead
         // pump: the watchdog must not fault (and then fall back) while audible Opus remains.
-        pumpStopped: !!(session.aborted || (session.reachedEof && ahead < 0.4)),
+        pumpStopped: !!(session.aborted || (trulyAtEof && ahead < 0.4)),
         queued: session.appendQueue.length
       };
     },
@@ -1925,7 +1926,10 @@
       if (!session || session.aborted || this.session !== session) return;
       session.supplyFailures = (session.supplyFailures || 0) + 1;
       session.supplyFailedAt = session.supplyFailedAt || Date.now();
-      if (immediate || session.supplyFailures >= 3 || Date.now() - session.supplyFailedAt >= 1800) {
+      session.lastFailureReason = String(reason || 'TV UMP supply failure');
+      const health = this.getSourceHealth(session.videoId);
+      const lowBuf = !health || health.bufferAheadSec / health.consumptionRate <= 4;
+      if (immediate || session.supplyFailures >= 3 || (lowBuf && Date.now() - session.supplyFailedAt >= 1800)) {
         this._supplyFallback(session, reason);
         return;
       }
@@ -2439,6 +2443,7 @@
         session.lastProgressAt = Date.now();
         session.supplyFailures = 0;
         session.supplyFailedAt = 0;
+        session.lastFailureReason = null;
         session.quotaRetries = 0;
         this._supplyState(session, 'healthy', 'segment-appended');
       } catch (err) {
@@ -2470,16 +2475,17 @@
         const nav = typeof StudioEngine774.navVidNow === 'function' ? StudioEngine774.navVidNow() : null;
         if (nav && nav !== session.videoId) { this.stopSession(session); return; }
         const health = this.getSourceHealth(session.videoId);
-        if (session.supplyFailedAt && Date.now() - session.supplyFailedAt >= 1800) {
-          this._supplyFallback(session, session.supplyReason || 'TV UMP supply exhausted');
-          return;
-        }
         if (session.sourceBuffer?.updating && session.appendStartedAt && Date.now() - session.appendStartedAt >= 1800) {
           this._supplyFallback(session, 'TV UMP MSE update stalled');
           return;
         }
         if (session.inFlight) {
           if (health && health.requestAgeMs >= 1500 && health.bufferAheadSec / health.consumptionRate <= 2) this.requestSupply('response-overdue');
+          return;
+        }
+        const lowBuf = !health || health.bufferAheadSec / health.consumptionRate <= 4;
+        if (session.supplyFailedAt && lowBuf && Date.now() - session.supplyFailedAt >= 1800) {
+          this._supplyFallback(session, session.lastFailureReason || session.supplyReason || 'TV UMP supply exhausted');
           return;
         }
         if (session.retryAt && Date.now() < session.retryAt) return;
@@ -2513,17 +2519,27 @@
         targetMs = Math.max(0, Math.floor(curSec * 1000));
         // Same inclusive-target rule as the buffered branch: never ask for a
         // timestamp inside the last fetched cluster, even when MSE has no strict
-        // range covering the playhead yet (append still settling). Without this
-        // floor the first pump after attach re-requested the cluster it already
-        // had, got an all-duplicate response and burned a supply failure.
-        if (session.lastContigEndMs) {
+        // range covering the playhead yet (append still settling). Guard the floor
+        // to +/-15s around targetMs so a stale watermark from a disjoint future range
+        // cannot jump past an unbuffered gap.
+        if (session.lastContigEndMs && session.lastContigEndMs >= targetMs - 15000 && session.lastContigEndMs <= targetMs + 15000) {
           targetMs = Math.max(targetMs, session.lastContigEndMs + 15);
         }
         session.reachedEof = false;
         session.emptyResponses = 0;
       } else {
         const durSec = session.durationSec || (video && video.duration > 0 ? video.duration : 0);
-        if (session.reachedEof || (durSec > 0 && bufEndSec >= durSec - 0.8)) {
+        if (session.lastContigEndMs && Math.round(bufEndSec * 1000) + 500 < session.lastContigEndMs) {
+          session.lastContigEndMs = Math.round(bufEndSec * 1000);
+          session.lastAppendedSeq = -1;
+          session.reachedEof = false;
+          session.endedStream = false;
+        }
+        if (session.reachedEof && durSec > 0 && bufEndSec < durSec - 2.0) {
+          session.reachedEof = false;
+          session.endedStream = false;
+        }
+        if ((session.reachedEof && (!durSec || bufEndSec >= durSec - 2.0)) || (durSec > 0 && bufEndSec >= durSec - 0.8)) {
           if (!session.endedStream && !session.sourceBuffer.updating && session.appendQueue.length === 0 && session.mediaSource.readyState === 'open' && curSec >= (durSec || bufEndSec) - 2.0) {
             try {
               session.mediaSource.endOfStream();
@@ -2542,15 +2558,10 @@
         }
         // Request targets are INCLUSIVE on the SABR timeline: asking for `t` returns the
         // cluster containing `t`, i.e. the cluster we just appended whenever `t` falls
-        // inside it. The demux watermark (lastContigEndMs) is the authoritative "everything
-        // up to here is fetched" mark — the next request must ALWAYS start past it. The old
-        // conditional floor (only applied when |bufEnd - watermark| < 600ms) let the target
-        // fall back INSIDE the last appended cluster whenever the MSE buffered end lagged
-        // the watermark by > 600ms (append queue settling / updateend ordering); the server
-        // then re-delivered that same cluster 3 times, every response was duplicate-skipped
-        // and supply failed over to native 251 ("TV UMP response made no media progress").
+        // inside it. Guard the lastContigEndMs floor to +/-15s around targetMs so a disjoint
+        // future watermark cannot skip over an unbuffered middle gap.
         targetMs = Math.round(bufEndSec * 1000) + 15;
-        if (session.lastContigEndMs) {
+        if (session.lastContigEndMs && session.lastContigEndMs >= targetMs - 15000 && session.lastContigEndMs <= targetMs + 15000) {
           targetMs = Math.max(targetMs, session.lastContigEndMs + 15);
         }
         if (durSec > 0 && targetMs >= durSec * 1000 - 200) {
@@ -2662,6 +2673,9 @@
         session.errorCount = 0;
         session.redirectCount = 0;
         session.emptyResponses = 0;
+        session.supplyFailures = 0;
+        session.supplyFailedAt = 0;
+        session.lastFailureReason = null;
         let queuedMedia = 0;
         let dupsMadeProgress = false;
         for (const seg of demuxed.segments) {
@@ -2678,25 +2692,31 @@
               return;
             }
           } else {
-            if (IS_FIREFOX && session.lastContigEndMs && seg.startMs > session.lastContigEndMs + 200 && seekTarget === null) {
+            if (IS_FIREFOX && session.lastContigEndMs && seg.startMs > session.lastContigEndMs + 200 && seekTarget === null &&
+                seg.startMs > Math.floor(curSec * 1000) &&
+                this.getStrictBufferedRange(session.sourceBuffer, (session.lastContigEndMs + 100) / 1000) === null) {
+              const gapMs = Math.round(seg.startMs - session.lastContigEndMs);
               const health = this.getSourceHealth(session.videoId);
-              this._supplyFailure(session, `TV UMP cluster gap ${Math.round(seg.startMs - session.lastContigEndMs)}ms`, health.bufferAheadSec <= 2);
+              const curEndGap = this.getBufferedEndFor(session.sourceBuffer, curSec);
+              session.lastContigEndMs = curEndGap !== null ? Math.round(curEndGap * 1000) : 0;
+              session.lastAppendedSeq = -1;
+              this._supplyFailure(session, `TV UMP cluster gap ${gapMs}ms`, Boolean(health && health.bufferAheadSec <= 2));
               return;
             }
             if (session.seekTargetSec !== null) {
               session.seekTargetSec = null;
             }
             // P0.3: a re-requested SABR response can redeliver clusters that were already
-            // appended (1/33 straight runs in round 3). seq is monotonic per stream, so anything
-            // at or below the last appended seq is a duplicate: skip it instead of appending it a
-            // second time. The continuity watermark still advances so the next request target
-            // stays right. seek resets the watermark to -1 (see onSeek).
-            if (session.lastAppendedSeq >= 0 && seg.seq <= session.lastAppendedSeq) {
+            // appended (1/33 straight runs in round 3). Skip clusters already buffered in MSE
+            // or at/below lastAppendedSeq; gap-fill after lastAppendedSeq = -1 can still append
+            // missing lower-seq segments without re-appending already-buffered ones.
+            const alreadyInMse = this.getStrictBufferedRange(session.sourceBuffer, (seg.startMs + 0.5 * seg.durMs) / 1000) !== null;
+            if (alreadyInMse || (session.lastAppendedSeq >= 0 && seg.seq <= session.lastAppendedSeq)) {
               session.dupsSkipped = (session.dupsSkipped || 0) + 1;
               const newEnd = seg.startMs + seg.durMs;
               const watermarkAdvanced = newEnd > (session.lastContigEndMs || 0);
               session.lastContigEndMs = Math.max(session.lastContigEndMs || 0, newEnd);
-              console.log(TAG, `[UmpMse774] Skipped duplicate cluster seq=${seg.seq} (last appended=${session.lastAppendedSeq}, skipped=${session.dupsSkipped})`);
+              console.log(TAG, `[UmpMse774] Skipped duplicate cluster seq=${seg.seq} (last appended=${session.lastAppendedSeq}, alreadyInMse=${alreadyInMse}, skipped=${session.dupsSkipped})`);
               if (watermarkAdvanced) dupsMadeProgress = true;
             } else {
               session.appendQueue.push(seg.data);
@@ -2719,6 +2739,7 @@
             session.emptyResponses = 0;
             session.supplyFailures = 0;
             session.supplyFailedAt = 0;
+            session.lastFailureReason = null;
             session.lastProgressAt = Date.now();
             this._supplyState(session, 'healthy', 'duplicate-confirmed watermark');
           } else {
@@ -2779,14 +2800,9 @@
       return true;
     },
 
-    // Maps a pointer position on the timeline bar to a time and prefetches it.
+    // Disabled: timeline hover must never prefetch or mutate the active SABR UMP session.
     prefetchFromTimeline(clientX, barRect, durationSec) {
-      if (typeof clientX !== 'number' || !isFinite(clientX)) return false;
-      if (!barRect || !(barRect.width > 20) || !(durationSec > 0)) return false;
-      const frac = Math.min(1, Math.max(0, (clientX - barRect.left) / barRect.width));
-      const sec = frac * durationSec;
-      if (!(sec > 0)) return false;
-      return this.prefetchSeek(sec, { protectPlayback: true });
+      return false;
     },
 
     onSeek(targetSec, opts = {}) {
@@ -3011,6 +3027,7 @@
         redirectCount: 0,
         lastAppendedSeq: -1,
         lastContigEndMs: 0,
+        lastFailureReason: null,
         seekTargetSec: null,
         durationSec,
         abortCtrl: null,
@@ -3638,32 +3655,24 @@
         } else if (reason === 'unexpected-pause' && !this._isAudioBuffering) {
           this._tryPlayAudio();
         } else if (reason === 'pump-stopped' && this.best774Candidate?._isUmpMse && UmpMseController774.isActive) {
-          // The UMP pump flagged itself stopped (reachedEof on an empty response, or a
-          // state the watchdog interprets as dead) while audible 774 buffer still exists.
-          // onSeek() is a NO-OP when the audio position is still inside the MSE buffer,
-          // so _reconnectStream cannot repair this class of fault — the deadline then
-          // expired and killed a stream that was still playing fine. Recover in place:
-          // a false reachedEof is cleared and the pump restarted at the live position;
-          // an aborted session is re-attached from the cached TV context.
+          // Recover an un-aborted session in place regardless of aheadSec (since !nearEnd):
+          // onSeek() inside _reconnectStream is a NO-OP when currentTime is still inside
+          // the MSE buffer, which left the pump dead until the 1250ms recovery deadline fired.
           const ump = UmpMseController774;
           const sess = ump.session;
-          const aliveBuffer = sample.aheadSec > 0.4;
           if (sess && !sess.aborted) {
-            if (sess.reachedEof && aliveBuffer) {
-              ChannelHealth.note('ump-repair', { kind: 'eof-cleared', aheadSec: sample.aheadSec });
-              sess.reachedEof = false;
-              sess.endedStream = false;
-              sess.supplyFailures = 0;
-              sess.supplyFailedAt = 0;
-              sess.retryAt = 0;
-              ump._supplyState(sess, 'healthy', 'watchdog-repair-restart');
-              ump.pump(sess);
-            } else if (aliveBuffer) {
-              // stopped-state session with buffer remaining: treat as healthy delivery
-              ump._supplyState(sess, 'healthy', 'watchdog-repair-stopped-state');
-            } else {
-              this._reconnectStream('health:' + reason, video.currentTime);
-            }
+            ChannelHealth.note('ump-repair', { kind: sess.reachedEof ? 'eof-cleared' : 'pump-restarted', aheadSec: sample.aheadSec });
+            sess.reachedEof = false;
+            sess.endedStream = false;
+            sess.supplyFailures = 0;
+            sess.supplyFailedAt = 0;
+            sess.retryAt = 0;
+            sess.lastFailureReason = null;
+            const curEnd = ump.getBufferedEndFor(sess.sourceBuffer, video.currentTime);
+            sess.lastContigEndMs = curEnd !== null ? Math.round(curEnd * 1000) : Math.max(0, Math.floor(video.currentTime * 1000));
+            sess.lastAppendedSeq = -1;
+            ump._supplyState(sess, 'healthy', 'watchdog-repair-restart');
+            ump.pump(sess);
           } else {
             this._reconnectStream('health:' + reason, video.currentTime);
           }
@@ -4710,29 +4719,6 @@
         document.addEventListener(evt, markPointerIntent, { capture: true, passive: true });
       });
 
-      // Lever 1: scrub/hover prefetch. While the pointer is over the timeline (hovering
-      // before a click, or dragging the scrubber), prefetch the cluster for the position
-      // under the cursor so the eventual release seek is already buffered. Throttled and
-      // playback-protected (prefetchSeek({ protectPlayback: true })).
-      let lastTimelinePrefetchAt = 0;
-      const onTimelineHover = (e) => {
-        if (!S.enabled || document.hidden) return;
-        if (!UmpMseController774.isActive || !StudioEngine774.isActive) return;
-        const t = e.target;
-        if (!t || typeof t.closest !== 'function') return;
-        const bar = t.closest('.ytp-progress-bar, .html5-progress-bar, .ytp-progress-bar-container, .html5-progress-bar-container, .ytp-scrubber-container, .html5-scrubber-button');
-        if (!bar || typeof bar.getBoundingClientRect !== 'function') return;
-        const now = Date.now();
-        if (now - lastTimelinePrefetchAt < 180) return;
-        const video = getMainVideoElement();
-        if (!video || !(video.duration > 0)) return;
-        lastTimelinePrefetchAt = now;
-        try {
-          UmpMseController774.prefetchFromTimeline(e.clientX, bar.getBoundingClientRect(), video.duration);
-        } catch (err) {}
-      };
-      document.addEventListener('pointermove', onTimelineHover, { capture: true, passive: true });
-
       document.addEventListener('keydown', (e) => {
         const tag = e.target?.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
@@ -5346,23 +5332,30 @@
           }
 
           if (newVid !== this.activeVideoId || !this.isActive) {
-            if (this._transitionTargetVid === newVid && pendingFetches.has(newVid)) {
+            if (pendingFetches.has(newVid)) {
               return;
+            }
+            if (newVid === this.activeVideoId && !this.isActive) {
+              const failedAt = failedFetches.get(newVid);
+              if (failedAt && Date.now() - failedAt < FAILED_RETRY_MS) {
+                return;
+              }
             }
             console.log(TAG, `[PlayerVideoDataChange] Video active inside player: ${newVid} (was ${this.activeVideoId}, active: ${this.isActive})`);
             if (this.pauseLockIsStale(newVid)) {
               this.unlockPlay();
             }
             navTargetVideoId = newVid;
-            failedSourcesPerVideo.delete(newVid);
-            failedFetches.delete(newVid);
-            confirmedNo774Videos.clear(); // Ephemeral: clear previous video no-774 state
+            if (newVid !== this.activeVideoId) {
+              failedSourcesPerVideo.delete(newVid);
+              failedFetches.delete(newVid);
+              confirmedNo774Videos.clear(); // Ephemeral: clear previous video no-774 state
+              if (this._transitionTargetVid !== newVid) {
+                this.prepareTransition(newVid);
+              }
+            }
             NextVideoManager.reset(newVid);
             isPlaybackEnded = false;
-
-            if (newVid !== this.activeVideoId && this._transitionTargetVid !== newVid) {
-              this.prepareTransition(newVid);
-            }
 
             if (this.pending774 && this.pending774.videoId === newVid) {
               const pending = this.pending774;
@@ -5713,7 +5706,7 @@
           console.log(TAG, `[StudioEngine774] Transition safety timeout for ${newVid} -> restoring native audio`);
           this.stopAndUnmute('Transition timeout fallback', newVid);
         }
-      }, IS_FIREFOX ? 1800 : 4000);
+      }, 4000);
       if (this.audio) {
         PlaybackArbiter.pauseAudio('prepareTransition');
         try {

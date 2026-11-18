@@ -1126,7 +1126,7 @@ let currentHarvestVideoId = null;
 // A resolver result always settles within the page-side recovery budget, including
 // host creation, iframe load and validation of the signed media URL.
 const FIREFOX_HARVESTER = typeof navigator !== 'undefined' && /Firefox\//.test(navigator.userAgent);
-const FF_HARVEST_BUDGET_MS = 1800;
+const FF_HARVEST_BUDGET_MS = 5000;
 const FF_HARVEST_RETRY_MS = 150;
 const FF_HARVEST_ERRORS = new Set(['FRAME_LOST', 'FRAME_BLOCKED', 'SESSION_EXPIRED', 'DECIPHER_FAILED',
   'TOKEN_REJECTED', 'URL_EXPIRED', 'MEDIA_UNAVAILABLE', 'HARVEST_TIMEOUT', 'HARVEST_CANCELLED', 'NO_774_STREAM']);
