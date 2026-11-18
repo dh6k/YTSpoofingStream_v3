@@ -2717,6 +2717,9 @@
           if (dupsMadeProgress) {
             session.errorCount = 0;
             session.emptyResponses = 0;
+            session.supplyFailures = 0;
+            session.supplyFailedAt = 0;
+            session.lastProgressAt = Date.now();
             this._supplyState(session, 'healthy', 'duplicate-confirmed watermark');
           } else {
             this._supplyFailure(session, 'TV UMP response made no media progress');
@@ -3053,8 +3056,8 @@
             // AV-sync (upstream v0.3.0): when the video was held waiting for
             // this cluster, align audio first, then release the video — the
             // picture can never sprint ahead while MSE audio seeks.
-            const wasWaitingVideo = StudioEngine774._pausedForAudioBuffer && !StudioEngine774._userPaused &&
-              !StudioEngine774._trackEnded && !v.ended && !StudioEngine774.isAdActive();
+            const wasWaitingVideo = Boolean(v && !v.ended) && StudioEngine774._pausedForAudioBuffer &&
+              !StudioEngine774._userPaused && !StudioEngine774._trackEnded && !StudioEngine774.isAdActive();
             if (v && a && StudioEngine774.isActive) {
               const strictAudio = this.getStrictBufferedRange(sb, a.currentTime);
               const strictVideo = this.getStrictBufferedRange(sb, cur);
@@ -3677,6 +3680,8 @@
     _rateCorrectionUntil: 0,
     _corrApplied: 1.0,
     _corrActive: false,
+    _corrStartedAt: 0,
+    _corrGaveUpAt: 0,
     _driftSmooth: null,
     _driftHist: [],
     _driftOutsideTicks: 0,
@@ -3690,6 +3695,8 @@
     _pausedForAudioBuffer: false,
     _audioWaitStartedAt: 0,
     _startupHoldTimer: null,
+    _pauseDeferTimer: null,
+    _hiddenPauseConfirmTimer: null,
     _audioPlayingAt: 0,
     _lastAudioSeekAlignAt: 0,
     _inSyncVol: false,
@@ -3751,7 +3758,7 @@
         clearInterval(this._pauseReassert);
         this._pauseReassert = null;
       }
-      if (wasPaused) PlaybackArbiter.userResume('unlockPlay');
+      if (wasPaused || PlaybackArbiter.state === 'USER_PAUSED') PlaybackArbiter.userResume('unlockPlay');
       else if (!this.isActive && PlaybackArbiter.state !== 'TRANSITION') PlaybackArbiter.detach('unlockPlay-idle');
     },
     // True when a pause lock does not belong to `vid` (or lock has no identity).
@@ -3817,6 +3824,10 @@
     // programmatic video.pause() cannot stop the audio synchronously either.
     deferAudioPause() {
       if (this._pauseDeferTimer) clearTimeout(this._pauseDeferTimer);
+      if (this._hiddenPauseConfirmTimer) {
+        clearTimeout(this._hiddenPauseConfirmTimer);
+        this._hiddenPauseConfirmTimer = null;
+      }
       this._pauseDeferTimer = setTimeout(() => {
         this._pauseDeferTimer = null;
         if (!this.isActive || !this.audio || this.audio.paused || this._userPaused) return;
@@ -3832,8 +3843,10 @@
         if (document.hidden) {
           if (!vNow || vNow.ended) { PlaybackArbiter.pauseAudio('defer-env-pause-ended'); return; }
           const frozenAt = vNow.currentTime;
+          const confirmVid = this.activeVideoId;
           const confirmTimer = setTimeout(() => {
             this._hiddenPauseConfirmTimer = null;
+            if (confirmVid && this.activeVideoId !== confirmVid) return;
             if (!this.isActive || !this.audio || this.audio.paused || this._userPaused) return;
             const v2 = getMainVideoElement();
             if (!v2 || v2.ended) { PlaybackArbiter.pauseAudio('defer-env-pause-ended'); return; }
@@ -3988,7 +4001,7 @@
         console.log(TAG, '[StudioEngine774] Audio-buffer hold exceeded cap — resuming video without 774 to avoid a frozen player.');
         this._pausedForAudioBuffer = false;
         this._audioWaitStartedAt = 0;
-        if (v && !v.paused) {
+        if (v && v.paused && !this._userPaused && !this._trackEnded && !v.ended && !this.isAdActive()) {
           this._isInternalVideoSync = true;
           try { PlaybackArbiter.playVideo('hold-cap-release'); } catch (e) {}
           setTimeout(() => { this._isInternalVideoSync = false; }, 150);
@@ -4013,6 +4026,18 @@
         clearTimeout(this._startupHoldTimer);
         this._startupHoldTimer = null;
       }
+      if (this._hiddenPauseConfirmTimer) {
+        clearTimeout(this._hiddenPauseConfirmTimer);
+        this._hiddenPauseConfirmTimer = null;
+      }
+      this._corrActive = false;
+      this._corrStartedAt = 0;
+      this._corrGaveUpAt = 0;
+      this._driftOutsideTicks = 0;
+      this._driftSmooth = null;
+      this._driftHist = [];
+      this._rateCorrection = 1.0;
+      this._rateCorrectionUntil = 0;
     },
 
     // True when the audio element has nothing decoded at timeSec yet (UMP fetch
@@ -4102,7 +4127,7 @@
         clearTimeout(this._startupHoldTimer);
         this._startupHoldTimer = null;
       }
-      if (!video || video.paused || this._userPaused || this._trackEnded || video.ended || this.isAdActive()) {
+      if (!video || !video.paused || this._userPaused || this._trackEnded || video.ended || this.isAdActive()) {
         return false;
       }
       this._isInternalVideoSync = true;
@@ -4926,6 +4951,14 @@
         // 4. Background / Hidden optimization: let audio play continuously in background unless player is truly paused/stopped
         if (document.hidden) {
           if ((e.type === 'play' || e.type === 'playing') && !this.isAdActive()) {
+            if (this._pauseDeferTimer) {
+              clearTimeout(this._pauseDeferTimer);
+              this._pauseDeferTimer = null;
+            }
+            if (this._hiddenPauseConfirmTimer) {
+              clearTimeout(this._hiddenPauseConfirmTimer);
+              this._hiddenPauseConfirmTimer = null;
+            }
             this._silenceElement(video);
             this.syncVol(video);
             this.applyAudioRate(video);
@@ -4957,10 +4990,14 @@
               try { e.stopImmediatePropagation(); e.stopPropagation(); } catch (err) {}
               return;
             }
-            // Confirmed paused/ended while hidden. Do not latch a sticky user pause
-            // from a hidden-tab pause (the user cannot have pressed anything): the
-            // media-session pause already muted the stream through userPause().
-            PlaybackArbiter.userPause('hidden-pause');
+            if (trackEnded) {
+              PlaybackArbiter.ended('hidden-ended');
+              PlaybackArbiter.pauseAudio('hidden-ended');
+              return;
+            }
+            // Confirmed paused while hidden. Do not latch a sticky user pause or
+            // USER_PAUSED arbiter state from a hidden-tab pause: the media-session
+            // pause already locks through lockPause() -> userPause().
             PlaybackArbiter.pauseAudio('hidden-pause');
             return;
           }
@@ -4975,9 +5012,15 @@
         if (e.type === 'play' || e.type === 'playing' || e.type === 'loadedmetadata' || e.type === 'canplay') {
           // A deferred (Firefox tab-return) audio pause must be cancelled as soon as the video
           // is actually playing again.
-          if (this._pauseDeferTimer && (e.type === 'play' || e.type === 'playing')) {
-            clearTimeout(this._pauseDeferTimer);
-            this._pauseDeferTimer = null;
+          if (e.type === 'play' || e.type === 'playing') {
+            if (this._pauseDeferTimer) {
+              clearTimeout(this._pauseDeferTimer);
+              this._pauseDeferTimer = null;
+            }
+            if (this._hiddenPauseConfirmTimer) {
+              clearTimeout(this._hiddenPauseConfirmTimer);
+              this._hiddenPauseConfirmTimer = null;
+            }
           }
           if (!this.isActive && !this.isAdActive()) {
             const curVid = document.getElementById('movie_player')?.getVideoData?.()?.video_id || (typeof getVideoIdFromUrl === 'function' ? getVideoIdFromUrl() : null);
@@ -5652,6 +5695,10 @@
         clearTimeout(this._seekDebounceTimer);
         this._seekDebounceTimer = null;
       }
+      if (this._hiddenPauseConfirmTimer) {
+        clearTimeout(this._hiddenPauseConfirmTimer);
+        this._hiddenPauseConfirmTimer = null;
+      }
       if (this._advanceFallbackTimer) {
         clearTimeout(this._advanceFallbackTimer);
         this._advanceFallbackTimer = null;
@@ -6095,6 +6142,7 @@
         this._driftHist = [];
         this._corrActive = false;
         this._corrStartedAt = 0;
+        this._corrGaveUpAt = 0;
         this._driftOutsideTicks = 0;
         this._startupAlignTicks = 0;
         this._rateCorrection = 1.0;
@@ -6120,6 +6168,8 @@
           this._driftSmooth = null;
           this._driftHist = [];
           this._corrActive = false;
+          this._corrStartedAt = 0;
+          this._corrGaveUpAt = 0;
           this._driftOutsideTicks = 0;
           this._startupAlignTicks = 0;
           this._rateCorrection = 1.0;
@@ -6137,6 +6187,8 @@
         this._driftSmooth = null;
         this._driftHist = [];
         this._corrActive = false;
+        this._corrStartedAt = 0;
+        this._corrGaveUpAt = 0;
         this._driftOutsideTicks = 0;
         this._rateCorrection = 1.0;
         this._rateCorrectionUntil = 0;
@@ -6146,12 +6198,16 @@
         if (smMs > 70) {
           this._driftOutsideTicks = (this._driftOutsideTicks || 0) + 1;
           // Two consecutive samples (1.5s) unless the drift is already large.
-          if (smMs > 150 || this._driftOutsideTicks >= 2) this._corrActive = true;
+          if (!this._corrGaveUpAt && (smMs > 150 || this._driftOutsideTicks >= 2)) {
+            this._corrActive = true;
+          }
         } else {
           this._driftOutsideTicks = 0;
+          this._corrGaveUpAt = 0;
         }
       } else if (smMs < 35) {
         this._corrActive = false;
+        this._corrGaveUpAt = 0;
       } else if (this._corrActive && now > (this._corrStartedAt || 0) + 6000) {
         // Correction budget: a correction converges within seconds when the drift
         // is real. One that is still outside the exit band after 6s means the
@@ -6160,6 +6216,7 @@
         // sound slowed down (Symptom C). Give up on rate, hand the residual to
         // the hard paths, and let playback return to exactly the user rate.
         this._corrActive = false;
+        this._corrStartedAt = 0;
         this._corrGaveUpAt = now;
         this._driftOutsideTicks = 0;
         this._rateCorrection = 1.0;
@@ -6755,6 +6812,10 @@
       if (this._seekDebounceTimer) {
         clearTimeout(this._seekDebounceTimer);
         this._seekDebounceTimer = null;
+      }
+      if (this._hiddenPauseConfirmTimer) {
+        clearTimeout(this._hiddenPauseConfirmTimer);
+        this._hiddenPauseConfirmTimer = null;
       }
       if (this._waitingPauseTimer) {
         clearTimeout(this._waitingPauseTimer);
